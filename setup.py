@@ -41,7 +41,7 @@ setup(
     license="Apache 2.0",
     version="0.01",
     python_requires=">=3.6",
-    setup_requires=["pip>=1.8", "setuptools>18.5", "numpy==1.19.2"],
+    setup_requires=["pip>=1.8", "setuptools>18.5", "numpy==1.19.2", "flatbuffers==1.12.0", "gast==0.3.3", "grpcio==1.32.0", "six==1.15.0", "tensorflow-estimator==2.4.0", "typing-extensions==3.7.4", "wrapt==1.12.1", "google-auth==1.6.3"],
     install_requires=install_requires,
     packages=find_packages(),
     zip_safe=False,
