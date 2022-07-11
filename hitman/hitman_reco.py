@@ -122,7 +122,11 @@ def main():
     network=args.network[0]
 
     #load hitnet
-    hitnet = tf.keras.models.load_model(args.network[0], custom_objects={"hitnet_trafo": hitnet_trafo,"Addons>mish":tfa.activations.mish})
+    try :
+        hitnet = tf.keras.models.load_model(args.network[0], custom_objects={"hitnet_trafo": hitnet_trafo,"Addons>mish":tfa.activations.mish})
+    except:
+        hitnet = tf.keras.models.load_model(args.network[0], custom_objects={"hitman_trafo": hitnet_trafo,"Addons>mish":tfa.activations.mish})
+        print("Deprication Warning: using old network structure, support will be abandoned soon")
     hitnet.layers[-1].activation = tf.keras.activations.linear
     
     chargenet = tf.keras.models.load_model(args.network[1], custom_objects={"chargenet_trafo": chargenet_trafo})
