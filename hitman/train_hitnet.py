@@ -29,9 +29,8 @@ def main():
     import matplotlib.pyplot as plt
     import pickle
 
-
-    #Data generator for training.  Takes correlated set as input, automatically shuffles data
-    #This belongs elsewhere but it will be fixed eventually
+    # Data generator for training.  Takes correlated set as input, automatically shuffles data
+    # This belongs elsewhere but it will be fixed eventually
     class DataGenerator(tf.keras.utils.Sequence):
         def __init__(self, x, t, batch_size=2 ** 16, time_spread=50):
 
@@ -126,7 +125,7 @@ def main():
     Train_Data = DataGenerator(hit[0:-splits], prm[0:-splits])
     Val_Data = DataGenerator(hit[-splits:-1], prm[-splits:-1])
 
-    labels = ['x', 'y', 'z', 'zenith', 'azimuth', 'time', 'energy'] #define hypothesis parameters
+    labels = ['x', 'y', 'z', 'zenith', 'azimuth', 'time', 'energy']  # define hypothesis parameters
 
     strategy = tf.distribute.MirroredStrategy()
     print("Number of devices: {}".format(strategy.num_replicas_in_sync))
@@ -148,7 +147,7 @@ def main():
 
     #   Automatically train until validation loss does not decrease for 50 epochs
     callbacks = []
-    callbacks.append(tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=50))
+    callbacks.append(tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=20))
     #   additional callbacks for saving network as a function of epoch and extra analytics
     #    callbacks.append(Save(save_every=2, path_template='resources/models/'+train_id+'/epoch_%i'))
     #    callbacks.append(tf.keras.callbacks.TensorBoard(log_dir='resources/logs/'+train_id, histogram_freq=1))
@@ -172,7 +171,9 @@ def main():
         plt.ylabel('loss')
         plt.xlabel('epoch')
         plt.legend(['train', 'test'], loc='upper left')
-        plt.savefig(args.output_graph[0], dpi=200)
+        plt.savefig(args.output_network[0] + '/hitnet.png', dpi=200)
 
+    # Set activation of last layer linear to change output of network to -LLH/p(x)
+    hitnet.layers[-1].activation = tf.keras.activations.linear
     # save the trained network
-    hitnet.save(args.output_network[0])
+    tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
