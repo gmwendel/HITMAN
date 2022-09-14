@@ -62,7 +62,7 @@ def main():
         all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
         all_llh = tfLLH(event['hits'], all_points, hitnet, event['total_charge'], chargenet).numpy()
         for i in range(20):
-            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max,E_min, E_max)
+            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
         n_minLLH = np.argpartition(all_llh, final_number)
@@ -100,12 +100,14 @@ def main():
         all_params = []
         params = tf.convert_to_tensor(params, np.float32)
 
-        #    descent_rates=tf.tile([[400.,400.,400.,0.1,0.1,0.013,0.003]],(len(params),1))*95/(len(hits)+7)*0.1 #wbls best
-        #    descent_rates=tf.tile([[600.,600.,600.,0.1,0.1,0.00013,0.1]],(len(params),1))*160/(len(hits)+15)*0.1 #gentle t
-        descent_rates = tf.tile([[800., 800., 800., 0.01, 0.01, 0.013, 0.003]], (len(params), 1)) * 0.25 * 95 / (
-                    len(hits) + 15)  # water best
+        descent_rates = tf.tile([[400., 400., 400., 0.1, 0.1, 0.013, 0.006]], (len(params), 1)) * 95 / (
+                    len(hits) + 7) * 0.1  # wbls best
 
-        for i in range(0, 50):
+        # descent_rates=tf.tile([[600.,600.,600.,0.1,0.1,0.00013,0.1]],(len(params),1))*160/(len(hits)+15)*0.1 #gentle t
+        # descent_rates = tf.tile([[800., 800., 800., 0.01, 0.01, 0.013, 0.003]], (len(params), 1)) * 0.25 * 95 / (
+        # len(hits) + 15)  # water best
+
+        for i in range(0, 250):
             with tf.GradientTape() as g:
                 g.watch(params)
                 llhs = tfLLH(hits, params, hitnet, charge, chargenet)
@@ -114,8 +116,7 @@ def main():
 
             all_llhs.append(llhs.numpy())
             all_params.append(params.numpy())
-            params = params - descent_rates * grads * (1 - (i / 61))  # water low hits
-        #        params = params-descent_rates*grads #relu
+            params = params-descent_rates*grads #relu
 
         return llhs, params, all_llhs, all_params
 
@@ -126,7 +127,7 @@ def main():
         x = theta
         hit = event['hits']
         residuals = (hit[:, 3] - x[5]) - n / c * (
-                    (x[0] - hit[:, 0]) ** 2 + (x[1] - hit[:, 1]) ** 2 + (x[2] - hit[:, 2]) ** 2) ** 0.5
+                (x[0] - hit[:, 0]) ** 2 + (x[1] - hit[:, 1]) ** 2 + (x[2] - hit[:, 2]) ** 2) ** 0.5
         lower = -3
         upper = 6
         out = np.where((residuals > lower) & (residuals < upper))
