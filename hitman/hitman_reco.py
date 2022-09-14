@@ -39,7 +39,7 @@ def main():
     import pickle
 
     # Generate uniform space to seed optimizer
-    def uniform_sample(samples, half_z, half_r, t_min, t_max, E_max):
+    def uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max):
         length = np.random.uniform(0, 1, size=(samples, 1))
         angle = np.pi * np.random.uniform(0, 2, size=(samples, 1))
 
@@ -52,17 +52,17 @@ def main():
         azimuth = np.random.uniform(0, 2 * np.pi, size=(samples, 1))
 
         t = np.random.uniform(t_min, t_max, size=(samples, 1))
-        E = np.random.uniform(0.9, E_max, size=(samples, 1))
+        E = np.random.uniform(E_min, E_max, size=(samples, 1))
         # stack initial points
         initial_points = np.hstack([x, y, z, zenith, azimuth, t, E]).astype(np.float32)
         return initial_points
 
     # Use random grid sampling to find best -LLH values before gradient descent
-    def best_guess(hitnet, chargenet, event, final_number, samples, half_z, half_r, t_min, t_max, E_max):
-        all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_max)
+    def best_guess(hitnet, chargenet, event, final_number, samples, half_z, half_r, t_min, t_max, E_min, E_max):
+        all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
         all_llh = tfLLH(event['hits'], all_points, hitnet, event['total_charge'], chargenet).numpy()
         for i in range(20):
-            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_max)
+            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max,E_min, E_max)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
         n_minLLH = np.argpartition(all_llh, final_number)
@@ -155,7 +155,7 @@ def main():
     for event in events:
         # generate 'best guess'
         initial_points = best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
-                                    float(args.radius), -5, 5, 2.0)
+                                    float(args.radius), -5, 5, 1.0, 3.0)
         event_results = eval_with_grads(event['hits'], initial_points, hitnet, event['total_charge'], chargenet)
         llhmin = np.min(event_results[2])
         llh = event_results[0].numpy()
