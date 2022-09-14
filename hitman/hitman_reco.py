@@ -150,8 +150,8 @@ def main():
     print('data loaded')
     print(len(events))
 
-    samples = 4000  # specifies batch size for initial grid search
-    final_number = 300  # specifies batch size for gradient descent
+    samples = 2000  # specifies batch size for initial grid search
+    final_number = 150  # specifies batch size for gradient descent
     i = 0
 
     # Optimize over all events loaded
