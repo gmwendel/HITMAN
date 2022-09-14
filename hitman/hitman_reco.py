@@ -136,7 +136,9 @@ def main():
 
     # load hitnet & chargenet
     hitnet = tf.keras.models.load_model(args.network + '/hitnet')
+    hitnet.layers[-1].activation = tf.keras.activations.linear
     chargenet = tf.keras.models.load_model(args.network + '/chargenet')
+    chargenet.layers[-1].activation = tf.keras.activations.linear
 
     # Load data for reconstruction
     events = []
