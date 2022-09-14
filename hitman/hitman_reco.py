@@ -69,14 +69,15 @@ def main():
         return all_points[n_minLLH[:final_number], :]
 
     # Define function that evaluates the negative log-likelihood
+    @tf.function
     def tfLLH(hits, theta, hitnet, charge, chargenet):
         num_params = tf.shape(theta)[0]
         h = tf.repeat(hits, num_params, axis=0)
-        p = tf.tile(theta, (len(hits), 1))
+        p = tf.tile(theta, (hits.shape[0], 1))
         c = tf.repeat([charge], num_params, axis=0)
         NLLH = -hitnet([h, p])
         #    print(theta)
-        out = tf.reshape(NLLH, (len(hits), len(theta)))
+        out = tf.reshape(NLLH, (hits.shape[0], theta.shape[0]))
         out = tf.math.reduce_sum(out, axis=0)
         out = out - tf.transpose(chargenet([c, theta]))
         return out[0]
