@@ -59,25 +59,21 @@ class hitnet_trafo(tf.keras.layers.Layer):
         dt = hit[:, 3] - params[:, self.time_idx]
 
         energy = params[:, self.energy_idx] - 1
-        event_time = (params[:, self.time_idx] + 25) / 25
-        pmt_time = (hit[:, 3] + 25) / 25
+        event_time = (params[:, self.time_idx]) / 25
+        pmt_time = (hit[:, 3]) / 25
 
         out = tf.stack([
-            params[:, self.x_idx] / 10000,
-            params[:, self.y_idx] / 10000,
-            params[:, self.z_idx] / 10000,
-            pmt_time - event_time,
-            #         (params[:, self.azimuth_idx]-3.142)/3.142,
-            #         (params[:, self.zenith_idx]-1.571)/1.571,
-            energy,
+            params[:, self.x_idx] / 1000,
+            params[:, self.y_idx] / 1000,
+            params[:, self.z_idx] / 1000,
             dir_x,
             dir_y,
             dir_z,
-            hit[:, 0] / 10000,
-            hit[:, 1] / 10000,
-            hit[:, 2] / 10000,
-            #         pmt_time,
-            hit[:, 4] - 1
+            pmt_time - event_time,
+            energy,
+            hit[:, 0] / 1000,
+            hit[:, 1] / 1000,
+            hit[:, 2] / 1000,
         ],
             axis=1
         )
@@ -136,9 +132,9 @@ class chargenet_trafo(tf.keras.layers.Layer):
         out = tf.stack([
             charge[:, 0] / 40 - 1,
             charge[:, 1] / 40 - 1,  # n_channels
-            params[:, self.x_idx] / 10000,
-            params[:, self.y_idx] / 10000,
-            params[:, self.z_idx] / 10000,
+            params[:, self.x_idx] / 1000,
+            params[:, self.y_idx] / 1000,
+            params[:, self.z_idx] / 1000,
             dir_x,
             dir_y,
             dir_z,
