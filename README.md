@@ -8,7 +8,7 @@ Likelihood reconstruction using machine learning.
 
 ```
 conda install -c anaconda python=3.7
-conda install -c anaconda tensorflow-gpu=2.4.1
+conda install -c anaconda tensorflow-gpu=2.10.0
 pip install --editable .
 ```
 
