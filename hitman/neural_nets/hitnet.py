@@ -38,7 +38,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
     def get_config(self):
         return {'hyp_labels': self.labels, 'max_energy': self.min_energy, 'max_energy': self.max_energy}
 
-    def call(self):
+    def call(self, hit, params):
         '''
          Parameters:
         -----------
