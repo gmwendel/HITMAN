@@ -42,7 +42,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
             hitnet = get_hitnet(activation='relu')
         else:
             hitnet = get_hitnet()
-        hitnet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=True)
+        hitnet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=False)
 
     train_id = 'HITNET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
 
@@ -113,7 +113,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
             chargenet = get_chargenet(activation='relu')
         else:
             chargenet = get_chargenet()
-        chargenet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=True)
+        chargenet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=False)
 
     train_id = 'CHARGENET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
 
