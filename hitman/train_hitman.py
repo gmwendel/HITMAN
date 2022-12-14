@@ -1,6 +1,6 @@
 def main():
     args = get_args()
-    from tools.ratextract import DataExtractor
+    from hitman.tools.ratextract import DataExtractor
     # load data
     Data = DataExtractor(args.input_files)
     charge_obs, hit_obs, charge_hyp, hit_hyp = Data.get_hitman_train()
