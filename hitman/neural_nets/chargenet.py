@@ -2,6 +2,7 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 from hitman.neural_nets.transformations import chargenet_trafo
 
+
 class chargenet_trafo(tf.keras.layers.Layer):
     '''Class to transfor inputs for Charget Net
     '''
@@ -17,7 +18,8 @@ class chargenet_trafo(tf.keras.layers.Layer):
 
         super().__init__()
 
-        assert (hyp_norm is not None) ^ (obs_norm is not None), 'Error: Specify normalization for BOTH hypothesis and observation'
+        assert (hyp_norm is not None) ^ (
+                    obs_norm is not None), 'Error: Specify normalization for BOTH hypothesis and observation'
 
         self.hyp_norm = hyp_norm
         self.obs_norm = obs_norm
@@ -67,13 +69,13 @@ class chargenet_trafo(tf.keras.layers.Layer):
         )
 
         return out
-def get_chargenet(labels,activation=tfa.activations.mish,layers=3):
 
+
+def get_chargenet(activation=tfa.activations.mish, layers=3):
     charge_input = tf.keras.Input(shape=(2,))
     params_input = tf.keras.Input(shape=(7,))
 
-
-    t = chargenet_trafo(labels=labels)
+    t = chargenet_trafo()
     h = t(charge_input, params_input)
     for i in range(layers):
         h = tf.keras.layers.Dense(256, activation=activation)(h)
