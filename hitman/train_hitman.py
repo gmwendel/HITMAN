@@ -63,10 +63,14 @@ def train_hitnet(args, hit_obs, hit_hyp):
                       callbacks=callbacks,
                       use_multiprocessing=True,
                       max_queue_size=512,
-                      workers=n_gpus)
+                      workers=2*n_gpus)
+
+    # save the trained network
+    tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
+    tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet.h5',
+                               save_format='h5')  # Old format (HITMAN 0.1)
 
     # summarize history for loss and accuracy
-
     plt.plot(hist.history['loss'])
     plt.plot(hist.history['val_loss'])
     plt.title('Hitnet Model Loss')
@@ -74,11 +78,6 @@ def train_hitnet(args, hit_obs, hit_hyp):
     plt.xlabel('epoch')
     plt.legend(['train', 'test'], loc='upper left')
     plt.savefig(args.output_network[0] + '/hitnet.png', dpi=200)
-
-    # save the trained network
-    tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
-    tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet.h5',
-                               save_format='h5')  # Old format (HITMAN 0.1)
 
 
 def train_chargenet(args, charge_obs, charge_hyp):
@@ -134,10 +133,14 @@ def train_chargenet(args, charge_obs, charge_hyp):
                       callbacks=callbacks,
                       use_multiprocessing=True,
                       max_queue_size=512,
-                      workers=n_gpus)
+                      workers=2*n_gpus)
+
+    # save the trained network
+    tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet', save_format='tf')
+    tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet.h5',
+                               save_format='h5')  # Old format (HITMAN 0.1)
 
     # summarize history for loss and accuracy
-
     plt.plot(hist.history['loss'])
     plt.plot(hist.history['val_loss'])
     plt.title('Chargenet Model Loss')
@@ -145,11 +148,6 @@ def train_chargenet(args, charge_obs, charge_hyp):
     plt.xlabel('epoch')
     plt.legend(['train', 'test'], loc='upper left')
     plt.savefig(args.output_network[0] + '/chargenet.png', dpi=200)
-
-    # save the trained network
-    tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet', save_format='tf')
-    tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet.h5',
-                               save_format='h5')  # Old format (HITMAN 0.1)
 
 
 def get_args():
