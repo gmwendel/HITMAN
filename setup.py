@@ -49,8 +49,7 @@ setup(
     zip_safe=False,
     entry_points={
         'console_scripts': [
-            'hitnet_train=hitman.train_hitnet:main', 'hitman_reco=hitman.hitman_reco:main',
-            'chargenet_train=hitman.train_chargenet:main'
+            'hitman_train=hitman.train_hitman:main', 'hitman_reco=hitman.hitman_reco:main'
         ],
     },
 )
