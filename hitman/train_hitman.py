@@ -30,9 +30,9 @@ def train_hitnet(args, hit_obs, hit_hyp):
     else:
         batch_scale = 0
     # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(hit_obs[0:-splits], hit_hyp[0:-splits], batch_size=2 ** (16 + batch_scale),
+    Train_Data = DataGenerator(hit_obs[0:-splits], hit_hyp[0:-splits], batch_size=2 ** (17 + batch_scale),
                                time_spread=args.t_shuffle)
-    Val_Data = DataGenerator(hit_obs[-splits:-1], hit_hyp[-splits:-1], batch_size=2 ** (16 + batch_scale),
+    Val_Data = DataGenerator(hit_obs[-splits:-1], hit_hyp[-splits:-1], batch_size=2 ** (17 + batch_scale),
                              time_spread=args.t_shuffle)
 
     with strategy.scope():
@@ -102,9 +102,9 @@ def train_chargenet(args, charge_obs, charge_hyp):
     else:
         batch_scale = 0
     # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (16 + batch_scale),
+    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (17 + batch_scale),
                                time_spread=0)
-    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (16 + batch_scale),
+    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (17 + batch_scale),
                              time_spread=0)
 
     with strategy.scope():
