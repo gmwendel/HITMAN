@@ -35,6 +35,14 @@ class hitnet_trafo(tf.keras.layers.Layer):
         self.time_idx = 5
         self.energy_idx = 6
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "hyp_norm": self.hyp_norm,
+            "obs_norm": self.obs_norm,
+        })
+        return config
+
     def call(self, obs, hyp):
         '''
          Parameters:
