@@ -91,19 +91,19 @@ def train_chargenet(args, charge_obs, charge_hyp):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.005)
+    optimizer = tf.keras.optimizers.Adam(0.001)
 
     # Take 1/10 total data and make it validation
     splits = int(len(charge_obs) / 10)
     # Scale batch size with number of GPUs
-    if n_gpus > 0:
+    if n_gpus > 1:
         batch_scale = int(math.log(n_gpus, 2))
     else:
         batch_scale = 0
     # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (17 + batch_scale),
+    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (15 + batch_scale),
                                time_spread=0)
-    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (17 + batch_scale),
+    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (15 + batch_scale),
                              time_spread=0)
 
     with strategy.scope():
