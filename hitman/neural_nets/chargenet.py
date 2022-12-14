@@ -1,7 +1,5 @@
 import tensorflow as tf
 import tensorflow_addons as tfa
-from hitman.neural_nets.transformations import chargenet_trafo
-
 
 class chargenet_trafo(tf.keras.layers.Layer):
     '''Class to transfor inputs for Charget Net
@@ -31,9 +29,6 @@ class chargenet_trafo(tf.keras.layers.Layer):
         self.azimuth_idx = 4
         self.time_idx = 5
         self.energy_idx = 6
-
-    def get_config(self):
-        return {'labels': self.labels, 'max_energy': self.min_energy, 'max_energy': self.max_energy}
 
     def call(self, charge, params):
         '''
@@ -81,6 +76,6 @@ def get_chargenet(activation=tfa.activations.mish, layers=3):
         h = tf.keras.layers.Dense(256, activation=activation)(h)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid')(h)
 
-    chargenet = tf.keras.Model(inputs=[hit_input, params_input], outputs=outputs)
+    chargenet = tf.keras.Model(inputs=[charge_input, params_input], outputs=outputs)
 
     return chargenet
