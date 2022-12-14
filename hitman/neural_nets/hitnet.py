@@ -22,7 +22,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
 
         super().__init__()
 
-        #assert (hyp_norm is not None) ^ (obs_norm is not None), 'Error: Specify normalization for BOTH hypothesis and observation'
+        # assert (hyp_norm is not None) ^ (obs_norm is not None), 'Error: Specify normalization for BOTH hypothesis and observation'
 
         self.hyp_norm = hyp_norm
         self.obs_norm = obs_norm
@@ -38,7 +38,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
     def get_config(self):
         return {'hyp_labels': self.labels, 'max_energy': self.min_energy, 'max_energy': self.max_energy}
 
-    def call(self, hit, params):
+    def call(self):
         '''
          Parameters:
         -----------
@@ -51,33 +51,31 @@ class hitnet_trafo(tf.keras.layers.Layer):
 
         '''
 
-        cosphi = tf.math.cos(params[:, self.azimuth_idx])
-        sinphi = tf.math.sin(params[:, self.azimuth_idx])
-        sintheta = tf.math.sin(params[:, self.zenith_idx])
+        cosphi = tf.math.cos(hyp[:, self.azimuth_idx])
+        sinphi = tf.math.sin(hyp[:, self.azimuth_idx])
+        sintheta = tf.math.sin(hyp[:, self.zenith_idx])
         dir_x = sintheta * cosphi
         dir_y = sintheta * sinphi
-        dir_z = tf.math.cos(params[:, self.zenith_idx])
+        dir_z = tf.math.cos(hyp[:, self.zenith_idx])
 
+        dt = obs[:, 3] - hyp[:, self.time_idx]
 
-
-        dt = hit[:, 3] - params[:, self.time_idx]
-
-        energy = params[:, self.energy_idx] - 1
-        event_time = (params[:, self.time_idx]) / 25
-        pmt_time = (hit[:, 3]) / 25
+        energy = hyp[:, self.energy_idx] - 1
+        event_time = (hyp[:, self.time_idx]) / 25
+        pmt_time = (obs[:, 3]) / 25
 
         out = tf.stack([
-            params[:, self.x_idx] / 1000,
-            params[:, self.y_idx] / 1000,
-            params[:, self.z_idx] / 1000,
+            hyp[:, self.x_idx] / 1000,
+            hyp[:, self.y_idx] / 1000,
+            hyp[:, self.z_idx] / 1000,
             dir_x,
             dir_y,
             dir_z,
             pmt_time - event_time,
             energy,
-            hit[:, 0] / 1000,
-            hit[:, 1] / 1000,
-            hit[:, 2] / 1000,
+            obs[:, 0] / 1000,
+            obs[:, 1] / 1000,
+            obs[:, 2] / 1000,
         ],
             axis=1
         )
@@ -86,8 +84,8 @@ class hitnet_trafo(tf.keras.layers.Layer):
 
 
 def get_hitnet(activation=tfa.activations.mish, layers=3):
-    hit_input = tf.keras.Input(shape=(7,))
-    params_input = tf.keras.Input(shape=(5,))
+    hit_input = tf.keras.Input(shape=(5,))
+    params_input = tf.keras.Input(shape=(7,))
 
     t = hitnet_trafo()
     h = t(hit_input, params_input)
