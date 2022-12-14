@@ -22,7 +22,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
 
         super().__init__()
 
-        assert (hyp_norm is not None) ^ (obs_norm is not None), 'Error: Specify normalization for BOTH hypothesis and observation'
+        #assert (hyp_norm is not None) ^ (obs_norm is not None), 'Error: Specify normalization for BOTH hypothesis and observation'
 
         self.hyp_norm = hyp_norm
         self.obs_norm = obs_norm
