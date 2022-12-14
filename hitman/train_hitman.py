@@ -3,7 +3,7 @@ def main():
     from hitman.tools.ratextract import DataExtractor
     # load data
     Data = DataExtractor(args.input_files)
-    charge_obs, hit_obs, charge_hyp, hit_hyp = Data.get_hitman_train()
+    charge_obs, hit_obs, charge_hyp, hit_hyp = Data.get_hitman_train_data()
     print("Data Loaded")
     train_hitnet(args, hit_obs, hit_hyp)
     train_chargenet(args, charge_obs, charge_hyp)
@@ -39,9 +39,9 @@ def train_hitnet(args, hit_obs, hit_hyp):
         # Everything that creates variables should be under the strategy scope.
         # In general this is only model construction & `compile()`.
         if args.use_relu:
-            hitnet = get_hitnet(labels, activation='relu')
+            hitnet = get_hitnet(activation='relu')
         else:
-            hitnet = get_hitnet(labels)
+            hitnet = get_hitnet()
         hitnet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=True)
 
     train_id = 'HITNET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
@@ -111,10 +111,10 @@ def train_chargenet(args, charge_obs, charge_hyp):
         # Everything that creates variables should be under the strategy scope.
         # In general this is only model construction & `compile()`.
         if args.use_relu:
-            chargenet = get_chargenet(labels, activation='relu')
+            chargenet = get_chargenet(activation='relu')
         else:
-            chargenet = get_chargenet(labels)
-        hitnet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=True)
+            chargenet = get_chargenet()
+        chargenet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=True)
 
     train_id = 'CHARGENET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
 
