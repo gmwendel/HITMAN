@@ -1,5 +1,6 @@
 import numpy as np
 import uproot
+import re
 
 
 class DataExtractor():
@@ -18,13 +19,14 @@ class DataExtractor():
     # Need to define a better way to get the valid outkey if there are several output trees in file
     def get_valid_out_key(self, infile):
         with uproot.open(infile) as file:
-            return file.keys()[0]
+            all_out_keys = [out_key for out_key in file.keys() if out_key.startswith('output')] #filter metas
+            all_out_num = np.array([int(out_key[-1]) for out_key in all_out_keys])
+            index = np.argmax(all_out_num)
+            return all_out_keys[index]
 
     def file_isvalid(self, infile):
         try:
             with uproot.open(infile) as file:
-                outputTree = file['output']
-                print(file.keys())
                 if len(file.keys()) > 1:
                     return True
                 else:
