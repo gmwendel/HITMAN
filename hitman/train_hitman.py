@@ -155,7 +155,7 @@ def get_args():
     # Get command line inputs
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input_files',
-                        help='Type = String; Input locations of training set files, e.g. $PWD/{1..16}.pkl', nargs='+',
+                        help='Type = String; Input locations of training set files, e.g. $PWD/{1..16}.root', nargs='+',
                         required=True)
     parser.add_argument('-o', '--output_network',
                         help='Type = String; Output location for trained network, e.g. networks/', nargs=1,
