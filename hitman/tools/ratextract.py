@@ -84,3 +84,59 @@ class DataExtractor():
 
         hit_hyp = np.repeat(charge_hyp, nhit, axis=0)
         return charge_obs, hit_obs, charge_hyp, hit_hyp
+
+    def get_hitman_reco_data(self): # Loads data in old format using python dicts
+        obsdata = uproot.concatenate(
+            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
+            filter_name=["hitPMTID", "hitPMTTime", "hitPMTCharge"], library='np')
+        maps = uproot.concatenate([infile + ":meta;1" for infile in self.input_files],
+                                  filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
+
+        ids = obsdata['hitPMTID']
+        nhit = np.array([len(charge) for charge in obsdata['hitPMTCharge']], dtype=np.int32)
+        charge_obs = np.stack([
+            np.array([np.sum(charge) for charge in obsdata['hitPMTCharge']], dtype=np.float32),
+            nhit.astype(np.float32)
+        ], axis=1
+        )
+
+
+        hypdata = uproot.concatenate(
+            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
+            filter_name=['mcx', 'mcy', 'mcz', 'mcu', 'mcv', 'mcw', 'mcke'], library='np')
+        mcaz = np.mod(np.arctan2(hypdata['mcv'], hypdata['mcu']), 2 * np.pi).astype(np.float32)
+        mcze = np.arccos(hypdata['mcw'] / np.linalg.norm([hypdata['mcu'], hypdata['mcv'], hypdata['mcw']], 2)).astype(
+            np.float32)
+        mct = np.zeros(len(mcze), np.float32)
+        charge_hyp = np.stack([hypdata['mcx'].astype(np.float32),
+                               hypdata['mcy'].astype(np.float32),
+                               hypdata['mcz'].astype(np.float32),
+                               mcze,
+                               mcaz,
+                               mct.astype(np.float32),
+                               hypdata['mcke'].astype(np.float32)
+                               ], axis=1)
+
+        events=[]
+
+        for i in range(len(ids)):
+            idx = ids[i]
+
+            hits = np.stack([
+                maps['pmtX'][0][idx].astype(np.float32),
+                maps['pmtY'][0][idx].astype(np.float32),
+                maps['pmtZ'][0][idx].astype(np.float32),
+                obsdata['hitPMTTime'][i].astype(np.float32),
+                obsdata['hitPMTCharge'][i].astype(np.float32)
+            ]
+                , axis=1)
+
+            event={
+                    "hits":  hits,
+                    "total_charge": charge_obs[i],
+                    "truth": charge_hyp[i]
+                }
+
+            events.append(event)
+        return events
+
