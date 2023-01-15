@@ -28,6 +28,10 @@ def main():
                         nargs=None,
                         required=True
                         )
+    parser.add_argument('--event_limit', default=-1, type=int,
+                        help='Type = Integer. Optional; Sets the max number of events to reconstruct; Default = all events',
+                        required=False)
+
     parser.add_argument('--print_numpy', default=False, type=bool,
                         help='Type = Boolean;  Prints additional numpy files about failed events, etc.; Default = False'
                         )
@@ -37,6 +41,7 @@ def main():
     import numpy as np
     import tensorflow as tf
     import pickle
+    from hitman.tools.ratextract import DataExtractor
 
     # Generate uniform space to seed optimizer
     def uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max):
@@ -101,7 +106,7 @@ def main():
         params = tf.convert_to_tensor(params, np.float32)
 
         descent_rates = tf.tile([[400., 400., 400., 0.1, 0.1, 0.013, 0.006]], (len(params), 1)) * 95 / (
-                    len(hits) + 7) * 0.1  # wbls best
+                len(hits) + 7) * 0.1  # wbls best
 
         # descent_rates=tf.tile([[600.,600.,600.,0.1,0.1,0.00013,0.1]],(len(params),1))*160/(len(hits)+15)*0.1 #gentle t
         # descent_rates = tf.tile([[800., 800., 800., 0.01, 0.01, 0.013, 0.003]], (len(params), 1)) * 0.25 * 95 / (
@@ -116,7 +121,7 @@ def main():
 
             all_llhs.append(llhs.numpy())
             all_params.append(params.numpy())
-            params = params-descent_rates*grads #relu
+            params = params - descent_rates * grads  # relu
 
         return llhs, params, all_llhs, all_params
 
@@ -133,8 +138,6 @@ def main():
         out = np.where((residuals > lower) & (residuals < upper))
         return len(out[0])
 
-    input_files = args.input_files
-
     # load hitnet & chargenet
     hitnet = tf.keras.models.load_model(args.network + '/hitnet')
     hitnet.layers[-1].activation = tf.keras.activations.linear
@@ -142,13 +145,12 @@ def main():
     chargenet.layers[-1].activation = tf.keras.activations.linear
 
     # Load data for reconstruction
-    events = []
-    for file in input_files:
-        fileObj = open(file, 'rb')
-        events = pickle.load(fileObj) + events
-        fileObj.close()
+    Data = DataExtractor(args.input_files)
+    events = Data.get_hitman_reco_data()
     print('data loaded')
     print(len(events))
+    events = events[:args.event_limit]
+    print('number of events to reconstruct: ', len(events))
 
     samples = 2000  # specifies batch size for initial grid search
     final_number = 150  # specifies batch size for gradient descent
@@ -172,6 +174,7 @@ def main():
         event['reco_LLH'] = llhmin
 
         print('reconstruction finished for event #' + str(i))
+        print('event results: ', event['reco'])
         i = i + 1
 
     # Save file with reconstructions
