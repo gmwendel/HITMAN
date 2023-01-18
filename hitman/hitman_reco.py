@@ -171,6 +171,7 @@ def main():
         # Add reco to file
 
         event['reco'] = event_results[3][a[0]][b[0]]
+        event['reco'][3:5] = proper_dir(event['reco'][3], event['reco'][4])
         event['reco_LLH'] = llhmin
 
         print('reconstruction finished for event #' + str(i))
