@@ -73,8 +73,7 @@ class DataExtractor():
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
             filter_name=['mcx', 'mcy', 'mcz', 'mcu', 'mcv', 'mcw', 'mcke'], library='np')
         mcaz = np.mod(np.arctan2(hypdata['mcv'], hypdata['mcu']), 2 * np.pi).astype(np.float32)
-        mcze = np.arccos(hypdata['mcw'] / np.linalg.norm([hypdata['mcu'], hypdata['mcv'], hypdata['mcw']], 2)).astype(
-            np.float32)
+        mcze = np.arccos(hypdata['mcw']).astype(np.float32)
         mct = np.zeros(len(mcze), np.float32)
         charge_hyp = np.stack([hypdata['mcx'].astype(np.float32),
                                hypdata['mcy'].astype(np.float32),
@@ -99,8 +98,7 @@ class DataExtractor():
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
             filter_name=['mcx', 'mcy', 'mcz', 'mcu', 'mcv', 'mcw', 'mcke'], library='np')
         mcaz = np.mod(np.arctan2(hypdata['mcv'], hypdata['mcu']), 2 * np.pi).astype(np.float32)
-        mcze = np.arccos(hypdata['mcw'] / np.linalg.norm([hypdata['mcu'], hypdata['mcv'], hypdata['mcw']], 2)).astype(
-            np.float32)
+        mcze = mcze = np.arccos(hypdata['mcw']).astype(np.float32)
         mct = np.zeros(len(mcze), np.float32)
         charge_hyp = np.stack([hypdata['mcx'].astype(np.float32),
                                hypdata['mcy'].astype(np.float32),
@@ -138,6 +136,6 @@ class DataExtractor():
                 "total_charge": charge_obs,
                 "truth": charge_hyp[i]
             }
-            if len(obsdata['hitPMTCharge'][i]) > 3:
+            if len(obsdata['hitPMTCharge'][i])>3:
                 events.append(event)
         return events
