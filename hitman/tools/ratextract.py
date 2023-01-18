@@ -91,17 +91,9 @@ class DataExtractor():
     def get_hitman_reco_data(self):  # Loads data in old format using python dicts
         obsdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=["hitPMTID", "hitPMTTime", "hitPMTCharge"], library='np')
+            filter_name=['mcPEIndex', 'mcPMTID', "mcPETime", "hitPMTCharge"], library='np')
         maps = uproot.concatenate([infile + ":meta;1" for infile in self.input_files],
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
-
-        ids = obsdata['hitPMTID']
-        nhit = np.array([len(charge) for charge in obsdata['hitPMTCharge']], dtype=np.int32)
-        charge_obs = np.stack([
-            np.array([np.sum(charge) for charge in obsdata['hitPMTCharge']], dtype=np.float32),
-            nhit.astype(np.float32)
-        ], axis=1
-        )
 
         hypdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
@@ -121,23 +113,31 @@ class DataExtractor():
 
         events = []
 
-        for i in range(len(ids)):
-            idx = ids[i]
+        for i in range(len(mcze)):
+            pe_idx = obsdata['mcPEIndex'][i]
+            idx = np.where(pe_idx == 0)[0]  # Get PMT Hits
+            n_hit = np.diff(idx, append=len(pe_idx))  # Count n_pe per sensor
+            idx = np.repeat(obsdata['mcPMTID'][i], n_hit)
 
+            charge_obs = np.stack([
+                np.sum(obsdata['hitPMTCharge'][i]),
+                np.sum(n_hit)
+            ]
+            )
             hits = np.stack([
                 maps['pmtX'][0][idx].astype(np.float32),
                 maps['pmtY'][0][idx].astype(np.float32),
                 maps['pmtZ'][0][idx].astype(np.float32),
-                obsdata['hitPMTTime'][i].astype(np.float32),
-                obsdata['hitPMTCharge'][i].astype(np.float32)
+                obsdata['mcPETime'][i].astype(np.float32),
+                (np.zeros(len(pe_idx)) + 1).astype(np.float32)
             ]
                 , axis=1)
 
             event = {
                 "hits": hits,
-                "total_charge": charge_obs[i],
+                "total_charge": charge_obs,
                 "truth": charge_hyp[i]
             }
-
-            events.append(event)
+            if len(obsdata['hitPMTCharge'][i]) > 3:
+                events.append(event)
         return events
