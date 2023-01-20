@@ -152,7 +152,7 @@ def main():
     events = events[:args.event_limit]
     print('number of events to reconstruct: ', len(events))
 
-    samples = 2000  # specifies batch size for initial grid search
+    samples = 1000  # specifies batch size for initial grid search
     final_number = 150  # specifies batch size for gradient descent
     i = 0
 
