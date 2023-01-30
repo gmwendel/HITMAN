@@ -42,7 +42,7 @@ setup(
     version="0.2",
     python_requires=">=3.7",
     setup_requires=["pip>=1.8", "setuptools>30.5", "numpy>=1.19.2", "flatbuffers==2.0.7", "gast==0.4.0",
-                    "grpcio==1.47.1", "six==1.16.0", "tensorflow-estimator==2.10.0", "typing-extensions==4.4.0",
+                    "grpcio>=1.47.1", "six==1.16.0", "tensorflow-estimator==2.10.0", "typing-extensions==4.4.0",
                     "wrapt==1.14.1", "google-auth==2.12.0"],
     install_requires=install_requires,
     packages=find_packages(),
