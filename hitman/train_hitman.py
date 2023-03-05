@@ -1,6 +1,6 @@
 def main():
     args = get_args()
-    from hitman.tools.ratextract import DataExtractor
+    from pyofos.roottools import DataExtractor
     # load data
     Data = DataExtractor(args.input_files)
     charge_obs, hit_obs, charge_hyp, hit_hyp = Data.get_hitman_train_data()
@@ -20,7 +20,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.001)
+    optimizer = tf.keras.optimizers.Adam(0.000001)
 
     # Take 1/10 total data and make it validation
     splits = int(len(hit_obs) / 10)
@@ -34,6 +34,8 @@ def train_hitnet(args, hit_obs, hit_hyp):
                                time_spread=args.t_shuffle)
     Val_Data = DataGenerator(hit_obs[-splits:-1], hit_hyp[-splits:-1], batch_size=2 ** (17 + batch_scale),
                              time_spread=args.t_shuffle)
+    del hit_obs
+    del hit_hyp
 
     with strategy.scope():
         # Everything that creates variables should be under the strategy scope.
@@ -91,7 +93,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.0001)
+    optimizer = tf.keras.optimizers.Adam(0.000001)
 
     # Take 1/10 total data and make it validation
     splits = int(len(charge_obs) / 10)
