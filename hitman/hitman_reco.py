@@ -41,10 +41,10 @@ def main():
     import numpy as np
     import tensorflow as tf
     import pickle
-    from hitman.tools.ratextract import DataExtractor
+    from pyofos.roottools import DataExtractor
 
     # Generate uniform space to seed optimizer
-    def uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max):
+    def uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max, pid):
         length = np.random.uniform(0, 1, size=(samples, 1))
         angle = np.pi * np.random.uniform(0, 2, size=(samples, 1))
 
@@ -59,15 +59,17 @@ def main():
         t = np.random.uniform(t_min, t_max, size=(samples, 1))
         E = np.random.uniform(E_min, E_max, size=(samples, 1))
         # stack initial points
-        initial_points = np.hstack([x, y, z, zenith, azimuth, t, E]).astype(np.float32)
+        pid = np.zeros((samples, 1)) + pid
+
+        initial_points = np.hstack([x, y, z, zenith, azimuth, t, E, pid]).astype(np.float32)
         return initial_points
 
     # Use random grid sampling to find best -LLH values before gradient descent
-    def best_guess(hitnet, chargenet, event, final_number, samples, half_z, half_r, t_min, t_max, E_min, E_max):
-        all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
+    def best_guess(hitnet, chargenet, event, final_number, samples, half_z, half_r, t_min, t_max, E_min, E_max, pid):
+        all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max, pid)
         all_llh = tfLLH(event['hits'], all_points, hitnet, event['total_charge'], chargenet).numpy()
-        for i in range(20):
-            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
+        for i in range(100):
+            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max, pid)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
         n_minLLH = np.argpartition(all_llh, final_number)
@@ -105,7 +107,7 @@ def main():
         all_params = []
         params = tf.convert_to_tensor(params, np.float32)
 
-        descent_rates = tf.tile([[400., 400., 400., 0.1, 0.1, 0.013, 0.006]], (len(params), 1)) * 95 / (
+        descent_rates = tf.tile([[400., 400., 400., 0.1, 0.1, 0.013, 0.006, 0]], (len(params), 1)) * 95 / (
                 len(hits) + 7) * 0.1  # wbls best
 
         # descent_rates=tf.tile([[600.,600.,600.,0.1,0.1,0.00013,0.1]],(len(params),1))*160/(len(hits)+15)*0.1 #gentle t
@@ -152,15 +154,17 @@ def main():
     events = events[:args.event_limit]
     print('number of events to reconstruct: ', len(events))
 
-    samples = 1000  # specifies batch size for initial grid search
-    final_number = 150  # specifies batch size for gradient descent
+    samples = 300  # specifies batch size for initial grid search
+    final_number = 50  # specifies batch size for gradient descent
     i = 0
 
     # Optimize over all events loaded
     for event in events:
         # generate 'best guess'
-        initial_points = best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
-                                    float(args.radius), -5, 5, 1.0, 3.0)
+        initial_points = np.vstack([best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
+                                               float(args.radius), -5, 5, 0.2, 4.9, 11),
+                                    best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
+                                               float(args.radius), -5, 5, 0.2, 4.9, 22)])
         event_results = eval_with_grads(event['hits'], initial_points, hitnet, event['total_charge'], chargenet)
         llhmin = np.min(event_results[2])
         llh = event_results[0].numpy()
