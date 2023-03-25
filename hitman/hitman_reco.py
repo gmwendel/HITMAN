@@ -41,7 +41,7 @@ def main():
     import numpy as np
     import tensorflow as tf
     import pickle
-    from hitman.tools.ratextract import DataExtractor
+    from hitman.tools.CCextract import DataExtractor
 
     # Generate uniform space to seed optimizer
     def uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max):

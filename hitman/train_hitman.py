@@ -1,6 +1,6 @@
 def main():
     args = get_args()
-    from pyofos.roottools import DataExtractor
+    from hitman.tools.CCextract import DataExtractor
     # load data
     Data = DataExtractor(args.input_files)
     charge_obs, hit_obs, charge_hyp, hit_hyp = Data.get_hitman_train_data()

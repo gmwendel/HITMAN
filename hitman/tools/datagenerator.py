@@ -2,18 +2,12 @@ import tensorflow as tf
 import numpy as np
 
 class DataGenerator(tf.keras.utils.Sequence):
-    def __init__(self, x, t, batch_size=2 ** 12, shuffle='free', time_spread=50):
+    def __init__(self, x, t, batch_size=2 ** 12, shuffle='free'):
         assert shuffle in ['free', 'inDOM'], "Choose either 'free' or 'inDOM' shuffling."
 
         self.batch_size = int(batch_size / 2)  # half true labels half false labels
         self.data = np.array(x)
         self.params = np.array(t)
-
-        # spread absolute time values (for hitnet)
-        if len(self.data[0]) > 4:
-            time_shifts = np.random.normal(0, time_spread, len(self.data))
-            self.data[:, 3] += time_shifts
-            self.params[:, 5] += time_shifts
 
         if shuffle == 'inDOM':
             self.shuffle_params_inDOM()
