@@ -1,8 +1,6 @@
 import numpy as np
 import uproot
 
-
-
 import numpy as np
 import uproot
 
@@ -39,7 +37,6 @@ class DataExtractor():
             index = np.argmax(all_out_num)
             return all_out_keys[index]
 
-
     def get_valid_init_mc_key(self, infile):
         with uproot.open(infile) as file:
             try:
@@ -64,11 +61,10 @@ class DataExtractor():
             print("Warning: Opening " + infile + " failed")
             return False
 
-
     def get_truth_data(self):
         truthdata = uproot.concatenate(
-            [self.input_files[i] + ":" + self.mc_keys[i] for i in range(len(self.input_files))],
-            filter_name=["azimuthalAngle","polarAngle","initialEnergy"], library='np')
+            [self.input_files[i] + ":" + self.init_mc_keys[i] for i in range(len(self.input_files))],
+            filter_name=["azimuthalAngle", "polarAngle", "initialEnergy"], library='np')
 
         az = np.mod(truthdata['azimuthalAngle'], 2 * np.pi).astype(np.float32)
 
@@ -131,4 +127,3 @@ class DataExtractor():
         hit_hyp = np.repeat(charge_hyp, nhit, axis=0)
 
         return charge_obs, hit_obs, charge_hyp, hit_hyp
-
