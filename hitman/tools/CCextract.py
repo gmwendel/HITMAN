@@ -67,10 +67,8 @@ class DataExtractor():
             filter_name=["azimuthalAngle", "polarAngle", "initialEnergy"], library='np')
 
         az = np.mod(truthdata['azimuthalAngle'], 2 * np.pi).astype(np.float32)
-
         ze = truthdata['polarAngle'].astype(np.float32)
-        E = np.array([time[0] for time in truthdata['i_time']])
-        energy = np.array([energy[0] for energy in truthdata['i_E']])
+        energy = truthdata['iniitalEnergy'].astype(np.float32)
 
         hyp = np.stack([
             ze,
