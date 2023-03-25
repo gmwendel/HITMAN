@@ -20,7 +20,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.000001)
+    optimizer = tf.keras.optimizers.Adam(0.0001)
 
     # Take 1/10 total data and make it validation
     splits = int(len(hit_obs) / 10)
@@ -30,9 +30,9 @@ def train_hitnet(args, hit_obs, hit_hyp):
     else:
         batch_scale = 0
     # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(hit_obs[0:-splits], hit_hyp[0:-splits], batch_size=2 ** (18 + batch_scale),
+    Train_Data = DataGenerator(hit_obs[0:-splits], hit_hyp[0:-splits], batch_size=2 ** (17 + batch_scale),
                                )
-    Val_Data = DataGenerator(hit_obs[-splits:-1], hit_hyp[-splits:-1], batch_size=2 ** (18 + batch_scale),
+    Val_Data = DataGenerator(hit_obs[-splits:-1], hit_hyp[-splits:-1], batch_size=2 ** (17 + batch_scale),
                              )
     del hit_obs
     del hit_hyp
