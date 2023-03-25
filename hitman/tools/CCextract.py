@@ -68,7 +68,7 @@ class DataExtractor():
 
         az = np.mod(truthdata['azimuthalAngle'], 2 * np.pi).astype(np.float32)
         ze = truthdata['polarAngle'].astype(np.float32)
-        energy = truthdata['iniitalEnergy'].astype(np.float32)
+        energy = truthdata['initialEnergy'].astype(np.float32)
 
         hyp = np.stack([
             ze,
