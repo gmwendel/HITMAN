@@ -22,14 +22,10 @@ class chargenet_trafo(tf.keras.layers.Layer):
         self.hyp_norm = hyp_norm
         self.obs_norm = obs_norm
 
-        self.x_idx = 0
-        self.y_idx = 1
-        self.z_idx = 2
-        self.zenith_idx = 3
-        self.azimuth_idx = 4
-        self.time_idx = 5
-        self.energy_idx = 6
-        self.pid_idx = 7
+        self.zenith_idx = 0
+        self.azimuth_idx = 1
+        self.energy_idx = 2
+
     def get_config(self):
         config = super().get_config()
         config.update({
@@ -47,7 +43,7 @@ class chargenet_trafo(tf.keras.layers.Layer):
             shape (N, 1), containing the event total hits
 
         params : tensor
-            shape (N, len(labels))
+            shape (N, 3) containing zenith, azimuth, and energy
 
         '''
 
@@ -56,18 +52,13 @@ class chargenet_trafo(tf.keras.layers.Layer):
         dir_z = tf.math.cos(params[:, self.zenith_idx])
 
         energy = params[:, self.energy_idx] - 1
-        pid = params[:,self.pid_idx]
 
         out = tf.stack([
             charge[:, 0] / 40 - 1,
-            params[:, self.x_idx] / 1000,
-            params[:, self.y_idx] / 1000,
-            params[:, self.z_idx] / 1000,
             dir_x,
             dir_y,
             dir_z,
-            energy,
-            pid
+            energy
         ],
             axis=1
         )
@@ -77,7 +68,7 @@ class chargenet_trafo(tf.keras.layers.Layer):
 
 def get_chargenet(activation=tfa.activations.mish, layers=3):
     charge_input = tf.keras.Input(shape=(1,))
-    params_input = tf.keras.Input(shape=(8,))
+    params_input = tf.keras.Input(shape=(3,))
 
     t = chargenet_trafo()
     h = t(charge_input, params_input)
