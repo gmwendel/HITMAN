@@ -49,7 +49,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
     train_id = 'HITNET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
 
     #   Automatically train until validation loss does not decrease for 25 epochs
-    callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=125)]
+    callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=25)]
     #   additional callbacks for saving network as a function of epoch and extra analytics
     if args.save_history:
         callbacks.append(tf.keras.callbacks.ModelCheckpoint(save_freq='epoch',
@@ -93,7 +93,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.000001)
+    optimizer = tf.keras.optimizers.Adam(0.001)
 
     # Take 1/10 total data and make it validation
     splits = int(len(charge_obs) / 10)
