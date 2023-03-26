@@ -101,27 +101,39 @@ class DataExtractor():
 
         return charge_obs, hit_obs, charge_hyp, hit_hyp
 
-    def get_hitman_reco_data(self):
+    def get_hitman_reco_data(self):  # Loads data in old format using python dicts
         obsdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['h_primary_id', 'h_time'], library='np')
+            filter_name=['channelID', 'timestamp'], library='np')
 
-        nhit = np.array([len(hits) for hits in obsdata['h_primary_id']], dtype=np.int32)
+        nhit = np.array([len(hits) for hits in obsdata['channelID']], dtype=np.int32)
         charge_obs = np.stack([
             nhit.astype(np.float32)
         ], axis=1)
 
         hit_obs = np.stack([
-            np.concatenate(obsdata['h_primary_id']).astype(np.float32),
-            np.concatenate(obsdata['h_time']).astype(np.float32)
+            np.concatenate(obsdata['channelID']).astype(np.float32),
+            np.concatenate(obsdata['timestamp']).astype(np.float32)
         ]
             , axis=1)
 
-        hit_obs[:, 1] = hit_obs[:, 1] + np.random.exponential(10, len(hit_obs[:, 1]))  # Add random time decay
+        hypdata = self.get_truth_data()
 
-        del obsdata
+        events = []
 
-        charge_hyp = self.get_init_truth_data()
-        hit_hyp = np.repeat(charge_hyp, nhit, axis=0)
+        for i in range(len(nhit)):
 
-        return charge_obs, hit_obs, charge_hyp, hit_hyp
+            hits = np.stack([
+                obsdata['channelID'][i].astype(np.float32),
+                obsdata['timestamp'][i].astype(np.float32)
+            ]
+                , axis=1)
+
+            event = {
+                "hits": hits,
+                "total_charge": charge_obs[i],
+                "truth": hypdata[i]
+            }
+            if len(obsdata['channelID'][i]) > 3:
+                events.append(event)
+        return events
