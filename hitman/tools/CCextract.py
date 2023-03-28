@@ -64,16 +64,18 @@ class DataExtractor():
     def get_truth_data(self):
         truthdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.init_mc_keys[i] for i in range(len(self.input_files))],
-            filter_name=["azimuthalAngle", "polarAngle", "initialEnergy"], library='np')
+            filter_name=["azimuthalAngle", "polarAngle", "initialEnergy", "timeOfFirstInt"], library='np')
 
         az = np.mod(truthdata['azimuthalAngle'], 2 * np.pi).astype(np.float32)
         ze = truthdata['polarAngle'].astype(np.float32)
         energy = truthdata['initialEnergy'].astype(np.float32)
+        time = truthdata['timeOfFirstInt'].astype(np.float32)
 
         hyp = np.stack([
             ze,
             az,
-            energy
+            energy,
+            time
         ], axis=1)
 
         return hyp
