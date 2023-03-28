@@ -18,16 +18,7 @@ def main():
                         nargs=None,
                         required=True
                         )
-    parser.add_argument('-r', '--radius',
-                        help='Type = int;  Specify detector radius in mm',
-                        nargs=None,
-                        required=True
-                        )
-    parser.add_argument('-z', '--half_height',
-                        help='Type = int;  Specify detector half-height in mm',
-                        nargs=None,
-                        required=True
-                        )
+
     parser.add_argument('--event_limit', default=-1, type=int,
                         help='Type = Integer. Optional; Sets the max number of events to reconstruct; Default = all events',
                         required=False)
@@ -40,6 +31,7 @@ def main():
 
     import numpy as np
     import tensorflow as tf
+    import matplotlib.pyplot as plt
     import pickle
     from hitman.tools.CCextract import DataExtractor
 
@@ -74,18 +66,21 @@ def main():
         return all_points[n_minLLH[:final_number], :]
 
     # Define function that evaluates the negative log-likelihood
-    @tf.function
+    #    @tf.function
     def tfLLH(hits, theta, hitnet, charge, chargenet):
         num_params = tf.shape(theta)[0]
         h = tf.repeat(hits, num_params, axis=0)
         p = tf.tile(theta, (hits.shape[0], 1))
         c = tf.repeat([charge], num_params, axis=0)
         NLLH = -hitnet([h, p])
-        #    print(theta)
         out = tf.reshape(NLLH, (hits.shape[0], theta.shape[0]))
         out = tf.math.reduce_sum(out, axis=0)
-        out = out - tf.transpose(chargenet([c, theta]))
+#        out = out - tf.transpose(chargenet([c, theta]))
+
         return out[0]
+
+    def LLH(hits, theta, hitnet, charge, chargenet):
+        return tfLLH(hits, theta, hitnet, charge, chargenet).numpy()
 
     # Spherical coordinates are cyclic, fix going beyond bounds.  e.g. azimuth 3pi = pi
     def proper_dir(zenith, azimuth):
@@ -125,18 +120,87 @@ def main():
 
         return llhs, params, all_llhs, all_params
 
-    def calc_n9(event, theta):
-        x = [theta[0], theta[1], theta[2], theta[5]]
-        c = 299792458 * 10 ** -6  # mm/ns
-        n = 1.333
-        x = theta
-        hit = event['hits']
-        residuals = (hit[:, 3] - x[5]) - n / c * (
-                (x[0] - hit[:, 0]) ** 2 + (x[1] - hit[:, 1]) ** 2 + (x[2] - hit[:, 2]) ** 2) ** 0.5
-        lower = -3
-        upper = 6
-        out = np.where((residuals > lower) & (residuals < upper))
-        return len(out[0])
+    def corner_plot(event):
+        scale = 1
+        font = 36 * scale
+        plt.rcParams.update({'font.size': font})
+        pos_size = 500
+        t_size = 1
+        resolution = 100
+        reco = event['truth']
+        reco[0], reco[1] = proper_dir(reco[0], reco[1])
+        print(reco)
+        ze = np.linspace(0, np.pi, resolution)
+        az = np.linspace(0, 2 * np.pi, resolution)
+        E = np.linspace(-1, 1, resolution)
+        dimensions = [ze, az]
+        name = ['ze (rad)', 'az (rad)']
+        dims = 2
+        fig, ax = plt.subplots(dims, dims, figsize=(32 * scale, 32 * scale))
+        for i in range(0, dims):
+            for j in range(0, i):
+                print(i, j)
+                d1, d2 = np.meshgrid(dimensions[j], dimensions[i])
+                n_evals = d1.flatten() * resolution ** 2
+                base = np.zeros((resolution ** 2, 3))
+                base[:, j] = base[:, j] + d1.flatten()
+                base[:, i] = base[:, i] + d2.flatten()
+
+                theta = base + np.tile(event['truth'], (resolution ** 2, 1))
+
+                if j == 0 or j == 1:
+                    theta[:, j] = d1.flatten()
+                if i == 0 or i == 1:
+                    theta[:, i] = d2.flatten()
+
+                scan = LLH(event['hits'], theta, hitnet, event['total_charge'], chargenet)
+                scan = np.reshape(scan, (-1, resolution))
+
+                if j == 0 or j == 1:
+                    xdim = dimensions[j]
+                else:
+                    xdim = dimensions[j] + reco[j]
+                if i == 0 or i == 1:
+                    ydim = dimensions[i]
+                else:
+                    ydim = dimensions[i] + reco[i]
+                ax[i, j].pcolormesh(xdim, ydim, scan)
+                ax[i, j].axhline(reco[i], color='r')
+                ax[i, j].axvline(reco[j], color='r')
+                ax[i, j].scatter(event['truth'][j], event['truth'][i], marker='*', s=font * 4, color='white')
+                # plt.colorbar(label="delta -LLH")
+                ax[i, j].set(xlabel=name[j], ylabel=name[i])
+                if (i > 0 and i < dims - 1):
+                    ax[i, j].xaxis.set_visible(False)
+                if (j > 0):
+                    ax[i, j].yaxis.set_visible(False)
+        twoDscan = scan
+        for i in range(0, dims):
+
+            theta = np.tile(event['truth'], (resolution, 1))
+
+            if i == 0 or i == 1:
+                theta[:, i] = dimensions[i]
+            else:
+                theta[:, i] = dimensions[i] + theta[:, i]
+
+            scan = LLH(event['hits'], theta, hitnet, event['total_charge'], chargenet)
+
+            if i == 0 or i == 1:
+                xdim = dimensions[i]
+            else:
+                xdim = dimensions[i] + reco[i]
+
+            ax[i, i].plot(xdim, scan)
+            # plt.colorbar(label="delta -LLH")
+            ax[i, i].set(xlabel=name[i])
+            ax[i, i].axis('off')
+
+        for i in range(0, dims):
+            for j in range(i + 1, dims):
+                fig.delaxes(ax[i][j])
+        #    fig.tight_layout()
+        return plt, twoDscan
 
     # load hitnet & chargenet
     hitnet = tf.keras.models.load_model(args.network + '/hitnet')
@@ -152,34 +216,34 @@ def main():
     events = events[:args.event_limit]
     print('number of events to reconstruct: ', len(events))
 
-    samples = 1000  # specifies batch size for initial grid search
-    final_number = 150  # specifies batch size for gradient descent
-    i = 0
+    all_llhs = []
+    for i in range(100):
+        if len(events[i]['hits']) > 0 and len(events[i]['hits']) < 200:
+            dimsize = 100  # specifies batch size for grid
+            resolution = 100
+            ze = np.linspace(0, np.pi, resolution)
+            az = np.linspace(0, 2 * np.pi, resolution)
 
-    # Optimize over all events loaded
-    for event in events:
-        # generate 'best guess'
-        initial_points = best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
-                                    float(args.radius), -5, 5, 1.0, 3.0)
-        event_results = eval_with_grads(event['hits'], initial_points, hitnet, event['total_charge'], chargenet)
-        llhmin = np.min(event_results[2])
-        llh = event_results[0].numpy()
-        index = np.where(llh == llhmin)
-        a, b = np.where(event_results[2] == np.min(event_results[2]))
-        print(llhmin)
+            plot, twoDscan = corner_plot(events[i])
+            plot.savefig("plots/" + str(i) + '.png')
+            plot.close()
 
-        # Add reco to file
+#            twoDscan = twoDscan / abs(np.sum(np.sum(twoDscan, axis=0), axis=0))  # normalize for sum
+            all_llhs.append(twoDscan)
 
-        event['reco'] = event_results[3][a[0]][b[0]]
-        event['reco'][3:5] = proper_dir(event['reco'][3], event['reco'][4])
-        event['reco_LLH'] = llhmin
+    all_llhs = np.array(all_llhs).astype(np.float64)
+    total = np.sum(all_llhs, axis=0)
+    plt.figure(figsize=(32, 32))
+    plt.pcolormesh(ze, az, total)
+    plt.axhline(events[0]['truth'][0], color='r')
+    plt.axvline(events[0]['truth'][1], color='r')
+    plt.title('Summed LLH')
+    plt.xlabel('zenith (rad)')
+    plt.ylabel('azimuth (rad)')
+    plt.savefig("plots/total.png")
+    idx_ze, idx_az = np.where(total == np.min(total))
+    print(ze[idx_ze], az[idx_az])
 
-        print('reconstruction finished for event #' + str(i))
-        print('event results: ', event['reco'])
-        i = i + 1
 
-    # Save file with reconstructions
-    fileObj = open(args.output_file, 'wb')
-    pickle.dump(events, fileObj)
-    fileObj.close()
-    exit()
+if __name__ == '__main__':
+    main()
