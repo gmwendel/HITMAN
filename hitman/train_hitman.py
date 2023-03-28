@@ -20,7 +20,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.0001)
+    optimizer = tf.keras.optimizers.Adam(0.002)
 
     # Take 1/10 total data and make it validation
     splits = int(len(hit_obs) / 10)
@@ -93,7 +93,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.001)
+    optimizer = tf.keras.optimizers.Adam(0.002)
 
     # Take 1/10 total data and make it validation
     splits = int(len(charge_obs) / 10)
