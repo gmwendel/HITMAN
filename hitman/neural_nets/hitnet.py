@@ -30,7 +30,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
         self.zenith_idx = 0
         self.azimuth_idx = 1
         self.energy_idx = 2
-
+        self.time_idx = 3
 
     def get_config(self):
         config = super().get_config()
@@ -49,7 +49,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
             shape (N, 2), containing hit Photosensor ID and time
 
         params : tensor
-            shape (N, 3) containing source, zenith, azimuth, and energy
+            shape (N, 4) containing source, zenith, azimuth, energy and initial time
 
         '''
 
@@ -67,9 +67,9 @@ class hitnet_trafo(tf.keras.layers.Layer):
             dir_x,
             dir_y,
             dir_z,
-            pmt_time,
             energy,
             obs[:, 0],
+            obs[:, 1] - hyp[:, self.time_idx]
         ],
             axis=1
         )
@@ -77,9 +77,9 @@ class hitnet_trafo(tf.keras.layers.Layer):
         return out
 
 
-def get_hitnet(activation=tfa.activations.mish, layers=3):
+def get_hitnet(activation=tfa.activations.mish, layers=2):
     hit_input = tf.keras.Input(shape=(2,))
-    params_input = tf.keras.Input(shape=(3,))
+    params_input = tf.keras.Input(shape=(4,))
 
     t = hitnet_trafo()
     h = t(hit_input, params_input)
