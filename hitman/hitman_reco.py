@@ -83,11 +83,12 @@ def main():
         return tfLLH(hits, theta, hitnet, charge, chargenet).numpy()
 
     def safe_LLH(hits, theta, hitnet, charge, chargenet):
-        out = []
-        split_theta = np.array_split(theta, 1 + int(len(theta / 4000)))
+        out=[]
+        split_theta=np.array_split(theta,1+int(len(theta)/4000))
         for t in split_theta:
-            out = out + LLH(hits, t, hitnet, charge, chargenet)
-        return np.array(out)
+            out.append(LLH(hits, t, hitnet, charge, chargenet))
+    #        print(out)
+        return np.concatenate(out)
 
     # Spherical coordinates are cyclic, fix going beyond bounds.  e.g. azimuth 3pi = pi
     def proper_dir(zenith, azimuth):
