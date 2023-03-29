@@ -68,7 +68,7 @@ class chargenet_trafo(tf.keras.layers.Layer):
 
 def get_chargenet(activation=tfa.activations.mish, layers=3):
     charge_input = tf.keras.Input(shape=(1,))
-    params_input = tf.keras.Input(shape=(3,))
+    params_input = tf.keras.Input(shape=(4,))
 
     t = chargenet_trafo()
     h = t(charge_input, params_input)
