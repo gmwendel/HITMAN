@@ -142,7 +142,7 @@ def main():
                 print(i, j)
                 d1, d2 = np.meshgrid(dimensions[j], dimensions[i])
                 n_evals = d1.flatten() * resolution ** 2
-                base = np.zeros((resolution ** 2, 3))
+                base = np.zeros((resolution ** 2, 4))
                 base[:, j] = base[:, j] + d1.flatten()
                 base[:, i] = base[:, i] + d2.flatten()
 
