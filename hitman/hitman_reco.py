@@ -75,12 +75,21 @@ def main():
         NLLH = -hitnet([h, p])
         out = tf.reshape(NLLH, (hits.shape[0], theta.shape[0]))
         out = tf.math.reduce_sum(out, axis=0)
-#        out = out - tf.transpose(chargenet([c, theta]))
+        #        out = out - tf.transpose(chargenet([c, theta]))
 
         return out[0]
 
     def LLH(hits, theta, hitnet, charge, chargenet):
         return tfLLH(hits, theta, hitnet, charge, chargenet).numpy()
+
+    def safe_LLH(hits, theta, hitnet, charge, chargenet):
+        out = []
+        split_theta = np.array_split(theta, 1 + int(len(theta / 4000)))
+        for t in split_theta:
+            print(t)
+            out = out + LLH(hits, t, hitnet, charge, chargenet)
+            print(out)
+        return np.array(out)
 
     # Spherical coordinates are cyclic, fix going beyond bounds.  e.g. azimuth 3pi = pi
     def proper_dir(zenith, azimuth):
@@ -153,7 +162,7 @@ def main():
                 if i == 0 or i == 1:
                     theta[:, i] = d2.flatten()
 
-                scan = LLH(event['hits'], theta, hitnet, event['total_charge'], chargenet)
+                scan = safe_LLH(event['hits'], theta, hitnet, event['total_charge'], chargenet)
                 scan = np.reshape(scan, (-1, resolution))
 
                 if j == 0 or j == 1:
@@ -184,7 +193,7 @@ def main():
             else:
                 theta[:, i] = dimensions[i] + theta[:, i]
 
-            scan = LLH(event['hits'], theta, hitnet, event['total_charge'], chargenet)
+            scan = safe_LLH(event['hits'], theta, hitnet, event['total_charge'], chargenet)
 
             if i == 0 or i == 1:
                 xdim = dimensions[i]
@@ -228,7 +237,7 @@ def main():
             plot.savefig("plots/" + str(i) + '.png')
             plot.close()
 
-#            twoDscan = twoDscan / abs(np.sum(np.sum(twoDscan, axis=0), axis=0))  # normalize for sum
+            #            twoDscan = twoDscan / abs(np.sum(np.sum(twoDscan, axis=0), axis=0))  # normalize for sum
             all_llhs.append(twoDscan)
 
     all_llhs = np.array(all_llhs).astype(np.float64)
