@@ -86,9 +86,7 @@ def main():
         out = []
         split_theta = np.array_split(theta, 1 + int(len(theta / 4000)))
         for t in split_theta:
-            print(t)
             out = out + LLH(hits, t, hitnet, charge, chargenet)
-            print(out)
         return np.array(out)
 
     # Spherical coordinates are cyclic, fix going beyond bounds.  e.g. azimuth 3pi = pi
