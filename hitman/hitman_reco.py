@@ -36,13 +36,9 @@ def main():
     from hitman.tools.CCextract import DataExtractor
 
     # Generate uniform space to seed optimizer
-    def uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max):
+    def uniform_sample(samples, t_min, t_max, E_min, E_max):
         length = np.random.uniform(0, 1, size=(samples, 1))
         angle = np.pi * np.random.uniform(0, 2, size=(samples, 1))
-
-        x = half_r * 0.9 * np.sqrt(length) * np.cos(angle)
-        y = half_r * 0.9 * np.sqrt(length) * np.sin(angle)
-        z = np.random.uniform(-half_z * 0.9, half_z * 0.9, size=(samples, 1))
 
         # Not Properly distribute points on surface of sphere
         zenith = np.arccos(np.random.uniform(-1, 1, size=(samples, 1)))
@@ -51,15 +47,15 @@ def main():
         t = np.random.uniform(t_min, t_max, size=(samples, 1))
         E = np.random.uniform(E_min, E_max, size=(samples, 1))
         # stack initial points
-        initial_points = np.hstack([x, y, z, zenith, azimuth, t, E]).astype(np.float32)
+        initial_points = np.hstack([zenith, azimuth, E, t]).astype(np.float32)
         return initial_points
 
     # Use random grid sampling to find best -LLH values before gradient descent
-    def best_guess(hitnet, chargenet, event, final_number, samples, half_z, half_r, t_min, t_max, E_min, E_max):
-        all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
+    def best_guess(hitnet, chargenet, event, final_number, samples, t_min, t_max, E_min, E_max):
+        all_points = uniform_sample(samples, t_min, t_max, E_min, E_max)
         all_llh = tfLLH(event['hits'], all_points, hitnet, event['total_charge'], chargenet).numpy()
         for i in range(20):
-            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
+            initial_points = uniform_sample(samples, t_min, t_max, E_min, E_max)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
         n_minLLH = np.argpartition(all_llh, final_number)
@@ -75,8 +71,7 @@ def main():
         NLLH = -hitnet([h, p])
         out = tf.reshape(NLLH, (hits.shape[0], theta.shape[0]))
         out = tf.math.reduce_sum(out, axis=0)
-        #        out = out - tf.transpose(chargenet([c, theta]))
-
+        out = out - tf.transpose(chargenet([c, theta]))
         return out[0]
 
     def LLH(hits, theta, hitnet, charge, chargenet):
@@ -84,10 +79,9 @@ def main():
 
     def safe_LLH(hits, theta, hitnet, charge, chargenet):
         out=[]
-        split_theta=np.array_split(theta,1+int(len(theta)/4000))
+        split_theta=np.array_split(theta,1+int(len(theta)/3000))
         for t in split_theta:
             out.append(LLH(hits, t, hitnet, charge, chargenet))
-    #        print(out)
         return np.concatenate(out)
 
     # Spherical coordinates are cyclic, fix going beyond bounds.  e.g. azimuth 3pi = pi
@@ -134,7 +128,7 @@ def main():
         plt.rcParams.update({'font.size': font})
         pos_size = 500
         t_size = 1
-        resolution = 100
+        resolution = 150
         reco = event['truth']
         reco[0], reco[1] = proper_dir(reco[0], reco[1])
         print(reco)
@@ -156,19 +150,19 @@ def main():
 
                 theta = base + np.tile(event['truth'], (resolution ** 2, 1))
 
-                if j == 0 or j == 1:
+                if j == 3 or j == 4:
                     theta[:, j] = d1.flatten()
-                if i == 0 or i == 1:
+                if i == 3 or i == 4:
                     theta[:, i] = d2.flatten()
 
                 scan = safe_LLH(event['hits'], theta, hitnet, event['total_charge'], chargenet)
                 scan = np.reshape(scan, (-1, resolution))
 
-                if j == 0 or j == 1:
+                if j == 3 or j == 4:
                     xdim = dimensions[j]
                 else:
                     xdim = dimensions[j] + reco[j]
-                if i == 0 or i == 1:
+                if i == 3 or i == 4:
                     ydim = dimensions[i]
                 else:
                     ydim = dimensions[i] + reco[i]
@@ -194,7 +188,7 @@ def main():
 
             scan = safe_LLH(event['hits'], theta, hitnet, event['total_charge'], chargenet)
 
-            if i == 0 or i == 1:
+            if i == 3 or i == 4:
                 xdim = dimensions[i]
             else:
                 xdim = dimensions[i] + reco[i]
@@ -225,26 +219,27 @@ def main():
     print('number of events to reconstruct: ', len(events))
 
     all_llhs = []
-    for i in range(100):
-        if len(events[i]['hits']) > 0 and len(events[i]['hits']) < 200:
-            dimsize = 100  # specifies batch size for grid
-            resolution = 100
-            ze = np.linspace(0, np.pi, resolution)
-            az = np.linspace(0, 2 * np.pi, resolution)
+    for i in range(400):
+        print(len(events[i]['hits']))
+        dimsize = 150  # specifies batch size for grid
+        resolution = 150
+        ze = np.linspace(0, np.pi, resolution)
+        az = np.linspace(0, 2 * np.pi, resolution)
 
-            plot, twoDscan = corner_plot(events[i])
-            plot.savefig("plots/" + str(i) + '.png')
-            plot.close()
+        plot, twoDscan = corner_plot(events[i])
+        plot.savefig("plots/" + str(i) + '.png')
+        plot.close()
+#        print(best_guess(hitnet, chargenet, events[i], final_number=10, samples=1000, t_min=events[i]['truth'][3], t_max=events[i]['truth'][3], E_min=events[i]['truth'][2], E_max=events[i]['truth'][2]))
 
-            #            twoDscan = twoDscan / abs(np.sum(np.sum(twoDscan, axis=0), axis=0))  # normalize for sum
-            all_llhs.append(twoDscan)
+        twoDscan = twoDscan + len(events[i]['hits'])+1  # normalize for sum
+        all_llhs.append(twoDscan)
 
     all_llhs = np.array(all_llhs).astype(np.float64)
     total = np.sum(all_llhs, axis=0)
     plt.figure(figsize=(32, 32))
     plt.pcolormesh(ze, az, total)
-    plt.axhline(events[0]['truth'][0], color='r')
-    plt.axvline(events[0]['truth'][1], color='r')
+    plt.axhline(events[0]['truth'][4], color='r')
+    plt.axvline(events[0]['truth'][3], color='r')
     plt.title('Summed LLH')
     plt.xlabel('zenith (rad)')
     plt.ylabel('azimuth (rad)')
