@@ -85,7 +85,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
         return out
 
 
-def get_hitnet(activation=tfa.activations.mish, layers=2):
+def get_hitnet(activation=tfa.activations.mish, layers=3):
     hit_input = tf.keras.Input(shape=(2,))
     params_input = tf.keras.Input(shape=(7,))
 
