@@ -64,9 +64,9 @@ class hitnet_trafo(tf.keras.layers.Layer):
         dir_z = tf.math.cos(hyp[:, self.zenith_idx])
 
         energy = hyp[:, self.energy_idx] - 1
-        x = params[:, self.x_idx]/8
-        y = params[:, self.y_idx]/8
-        z = params[:, self.z_idx]/8
+        x = hyp[:, self.x_idx]/8
+        y = hyp[:, self.y_idx]/8
+        z = hyp[:, self.z_idx]/8
 
         out = tf.stack([
             x,
