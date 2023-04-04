@@ -78,8 +78,8 @@ def main():
         return tfLLH(hits, theta, hitnet, charge, chargenet).numpy()
 
     def safe_LLH(hits, theta, hitnet, charge, chargenet):
-        out=[]
-        split_theta=np.array_split(theta,1+int(len(theta)/3000))
+        out = []
+        split_theta = np.array_split(theta, 1 + int(len(theta) / 3000))
         for t in split_theta:
             out.append(LLH(hits, t, hitnet, charge, chargenet))
         return np.concatenate(out)
@@ -126,25 +126,31 @@ def main():
         scale = 1
         font = 36 * scale
         plt.rcParams.update({'font.size': font})
-        pos_size = 500
-        t_size = 1
-        resolution = 150
+        pos_size = 10
+        t_size = .5
+        resolution = 100
         reco = event['truth']
-        reco[0], reco[1] = proper_dir(reco[0], reco[1])
+
         print(reco)
+        x = np.linspace(-pos_size, pos_size, resolution)
+        y = np.linspace(-pos_size, pos_size, resolution)
+        z = np.linspace(-pos_size, pos_size, resolution)
         ze = np.linspace(0, np.pi, resolution)
         az = np.linspace(0, 2 * np.pi, resolution)
-        E = np.linspace(-1, 1, resolution)
-        dimensions = [ze, az]
-        name = ['ze (rad)', 'az (rad)']
-        dims = 2
+        t = np.linspace(-t_size, t_size, resolution)
+        E = np.linspace(-.5, .5, resolution)
+        dimensions = [x, y, z, ze, az, t, E]
+
+        name = ['x (mm)', 'y (mm)', 'z (mm)', 'ze (rad)', 'az (rad)', 't (ns)', 'E (MeV)']
+        dimensions = [x, y, z, ze, az, t, E]
+        dims = 7
         fig, ax = plt.subplots(dims, dims, figsize=(32 * scale, 32 * scale))
         for i in range(0, dims):
             for j in range(0, i):
                 print(i, j)
                 d1, d2 = np.meshgrid(dimensions[j], dimensions[i])
                 n_evals = d1.flatten() * resolution ** 2
-                base = np.zeros((resolution ** 2, 4))
+                base = np.zeros((resolution ** 2, 7))
                 base[:, j] = base[:, j] + d1.flatten()
                 base[:, i] = base[:, i] + d2.flatten()
 
@@ -227,11 +233,11 @@ def main():
         az = np.linspace(0, 2 * np.pi, resolution)
 
         plot, twoDscan = corner_plot(events[i])
-        plot.savefig("plots/" + str(i) + '.png')
+        plot.savefig("plots/" + str(i).zfill(3) + '.png')
         plot.close()
-#        print(best_guess(hitnet, chargenet, events[i], final_number=10, samples=1000, t_min=events[i]['truth'][3], t_max=events[i]['truth'][3], E_min=events[i]['truth'][2], E_max=events[i]['truth'][2]))
+        #        print(best_guess(hitnet, chargenet, events[i], final_number=10, samples=1000, t_min=events[i]['truth'][3], t_max=events[i]['truth'][3], E_min=events[i]['truth'][2], E_max=events[i]['truth'][2]))
 
-        twoDscan = twoDscan + len(events[i]['hits'])+1  # normalize for sum
+        twoDscan = twoDscan + len(events[i]['hits']) + 1  # normalize for sum
         all_llhs.append(twoDscan)
 
     all_llhs = np.array(all_llhs).astype(np.float64)
