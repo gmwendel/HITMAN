@@ -70,7 +70,7 @@ def main():
     def best_guess(hitnet, chargenet, event, final_number, samples, half_z, half_r, t_min, t_max, E_min, E_max):
         all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
         all_llh = tfLLH(event['hits'], all_points, hitnet, event['total_charge'], chargenet).numpy()
-        for i in range(20):
+        for i in range(10):
             initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
@@ -156,7 +156,7 @@ def main():
     events = events[args.event_start:args.event_limit]
     print('number of events to reconstruct: ', len(events))
 
-    samples = 1000  # specifies batch size for initial grid search
+    samples = 500  # specifies batch size for initial grid search
     final_number = 150  # specifies batch size for gradient descent
     i = 0
 
