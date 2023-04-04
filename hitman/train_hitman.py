@@ -47,7 +47,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
     train_id = 'HITNET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
 
     #   Automatically train until validation loss does not decrease for 25 epochs
-    callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=125)]
+    callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=35)]
     #   additional callbacks for saving network as a function of epoch and extra analytics
     if args.save_history:
         callbacks.append(tf.keras.callbacks.ModelCheckpoint(save_freq='epoch',
