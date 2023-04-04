@@ -63,7 +63,7 @@ class DataExtractor():
             maps['pmtY'][0][idx].astype(np.float32),
             maps['pmtZ'][0][idx].astype(np.float32),
             np.concatenate(obsdata['mcPETime']).astype(np.float32),
-            np.concatenate(obsdata['mcPEWavelength']).astype(np.float32)
+            (np.zeros(len(pe_idx)) + 1).astype(np.float32)
         ]
             , axis=1)
 
@@ -127,7 +127,7 @@ class DataExtractor():
                 maps['pmtY'][0][idx].astype(np.float32),
                 maps['pmtZ'][0][idx].astype(np.float32),
                 obsdata['mcPETime'][i].astype(np.float32),
-                obsdata['mcPEWavelength'][i].astype(np.float32)
+                (np.zeros(len(pe_idx)) + 1).astype(np.float32)
             ]
                 , axis=1)
 
