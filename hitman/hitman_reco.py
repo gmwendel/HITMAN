@@ -28,6 +28,10 @@ def main():
                         nargs=None,
                         required=True
                         )
+    parser.add_argument('--event_start', default=0, type=int,
+                        help='Type = Integer. Optional; Sets the start number of events to reconstruct; Default = all events',
+                        required=False)
+
     parser.add_argument('--event_limit', default=-1, type=int,
                         help='Type = Integer. Optional; Sets the max number of events to reconstruct; Default = all events',
                         required=False)
@@ -149,7 +153,7 @@ def main():
     events = Data.get_hitman_reco_data()
     print('data loaded')
     print(len(events))
-    events = events[:args.event_limit]
+    events = events[args.event_start:args.event_limit]
     print('number of events to reconstruct: ', len(events))
 
     samples = 1000  # specifies batch size for initial grid search
