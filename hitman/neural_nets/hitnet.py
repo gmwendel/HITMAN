@@ -81,6 +81,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
             obs[:, 0] / 1000,
             obs[:, 1] / 1000,
             obs[:, 2] / 1000,
+            obs[:, 4] / 300 - 1  # charge/wavelength
         ],
             axis=1
         )
