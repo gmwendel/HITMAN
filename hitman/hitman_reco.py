@@ -74,6 +74,7 @@ def main():
             initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
+            all_llh = np.hstack([all_llh, llh])
         n_minLLH = np.argpartition(all_llh, final_number)
         return all_points[n_minLLH[:final_number], :]
 
@@ -164,7 +165,7 @@ def main():
     for event in events:
         # generate 'best guess'
         initial_points = best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
-                                    float(args.radius), -5, 5, 1.0, 3.0)
+                                    float(args.radius), -5, 5, 1.25, 2.75)
         event_results = eval_with_grads(event['hits'], initial_points, hitnet, event['total_charge'], chargenet)
         llhmin = np.min(event_results[2])
         llh = event_results[0].numpy()
