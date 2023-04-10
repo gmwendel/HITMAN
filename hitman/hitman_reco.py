@@ -74,7 +74,7 @@ def main():
             initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
-            all_llh = np.hstack([all_llh, llh])
+            all_llh = np.vstack([all_llh, llh])
         n_minLLH = np.argpartition(all_llh, final_number)
         return all_points[n_minLLH[:final_number], :]
 
