@@ -72,8 +72,32 @@ class chargenet_trafo(tf.keras.layers.Layer):
 
         return out
 
+def mish(x):
+    r"""Mish: A Self Regularized Non-Monotonic Neural Activation Function.
 
-def get_chargenet(activation=tfa.activations.mish, layers=3):
+    Computes mish activation:
+
+    $$
+    \mathrm{mish}(x) = x \cdot \tanh(\mathrm{softplus}(x)).
+    $$
+
+    See [Mish: A Self Regularized Non-Monotonic Neural Activation Function](https://arxiv.org/abs/1908.08681).
+
+    Usage:
+
+    >>> x = tf.constant([1.0, 0.0, 1.0])
+    >>> tfa.activations.mish(x)
+    <tf.Tensor: shape=(3,), dtype=float32, numpy=array([0.865098..., 0.       , 0.865098...], dtype=float32)>
+
+    Args:
+        x: A `Tensor`. Must be one of the following types:
+            `bfloat16`, `float16`, `float32`, `float64`.
+    Returns:
+        A `Tensor`. Has the same type as `x`.
+    """
+    x = tf.convert_to_tensor(x)
+    return x * tf.math.tanh(tf.math.softplus(x))
+def get_chargenet(activation=mish, layers=3):
     charge_input = tf.keras.Input(shape=(2,))
     params_input = tf.keras.Input(shape=(7,))
 

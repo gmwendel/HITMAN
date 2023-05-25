@@ -19,7 +19,6 @@ def get_dist(pkgname):
 
 install_requires = [
     "matplotlib>=3.0",
-    "tensorflow-addons==0.18.0",
     "scipy",
     "numpy>=1.19.2",
 ]
