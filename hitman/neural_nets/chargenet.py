@@ -1,5 +1,5 @@
 import tensorflow as tf
-import tensorflow_addons as tfa
+
 
 class chargenet_trafo(tf.keras.layers.Layer):
     '''Class to transfor inputs for Charget Net
