@@ -52,9 +52,9 @@ def train_hitnet(args, hit_obs, hit_hyp):
     if args.save_history:
         callbacks.append(
             tf.keras.callbacks.ModelCheckpoint(
-                args.output_network[0] + 'resources/checkpoints_hitnet/' + 'hitnet_{epoch:02d}',
+                args.output_network[0] + '/resources/checkpoints_hitnet/' + 'hitnet_{epoch:02d}',
                 save_freq='epoch'))
-        callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=args.output_network[0] + 'resources/logs_hitnet',
+        callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=args.output_network[0] + '/resources/logs_hitnet',
                                                         histogram_freq=1))
 
     hist = hitnet.fit(x=Train_Data,
@@ -124,9 +124,9 @@ def train_chargenet(args, charge_obs, charge_hyp):
     if args.save_history:
         callbacks.append(
             tf.keras.callbacks.ModelCheckpoint(
-                args.output_network[0] + 'resources/checkpoints_chargenet/' + 'chargenet_{epoch:02d}',
+                args.output_network[0] + '/resources/checkpoints_chargenet/' + 'chargenet_{epoch:02d}',
                 save_freq='epoch'))
-        callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=args.output_network[0] + 'resources/logs_chargenet',
+        callbacks.append(tf.keras.callbacks.TensorBoard(log_dir=args.output_network[0] + '/resources/logs_chargenet',
                                                         histogram_freq=1))
 
     hist = chargenet.fit(x=Train_Data,
