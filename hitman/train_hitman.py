@@ -68,8 +68,6 @@ def train_hitnet(args, hit_obs, hit_hyp):
 
     # save the trained network
     tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
-    tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet.h5',
-                               save_format='h5')  # Old format (HITMAN 0.1)
 
     # summarize history for loss and accuracy
     plt.plot(hist.history['loss'])
@@ -140,8 +138,6 @@ def train_chargenet(args, charge_obs, charge_hyp):
 
     # save the trained network
     tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet', save_format='tf')
-    tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet.h5',
-                               save_format='h5')  # Old format (HITMAN 0.1)
 
     # summarize history for loss and accuracy
     plt.plot(hist.history['loss'])
