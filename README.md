@@ -20,7 +20,7 @@ conda install -c conda-forge cudatoolkit=11.2.0
 pip install nvidia-cudnn-cu11==8.1.*
 ```
 
-Configure the system paths to use the correct CUDA version:
+Configure the system environment to use the correct CUDA version:
 ```
 mkdir -p $CONDA_PREFIX/etc/conda/activate.d
 echo 'CUDNN_PATH=$(dirname $(python -c "import nvidia.cudnn;print(nvidia.cudnn.__file__)"))' >> $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
