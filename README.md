@@ -62,7 +62,7 @@ To run the likelihood reconstruction specify
 * the location you would like to save the reconstructed events using -o
 
 ```
-hitman_reco -i /path/to/{1..10}_reco.root.ntuple --n /path/to/netork_save_location --o /path/to/reco_save_location
+hitman_reco -i /path/to/{1..10}_reco.root.ntuple -n /path/to/netork_save_location -o /path/to/reco_save_location
 ```
 
 Note: hitman_reco has only been verified to work for the Y90 beta spectrum and may be sensitive to likelihood spaces 
