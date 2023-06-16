@@ -1,6 +1,10 @@
 # *HITMAN*
 
-Likelihood reconstruction using machine learning.
+A tool to generate neural networks that produce likelihoods for reconstruction of physics events in optical neutrino
+detectors.  This is an implementation of the technique outlined by [Eller, et. al](
+https://doi.org/10.1016/j.nima.2023.168011)
+
+
 
 
 ## Installation
