@@ -21,6 +21,7 @@ install_requires = [
     "matplotlib>=3.0",
     "scipy",
     "numpy>=1.19.2",
+    "uproot>=3.14.4",
 ]
 
 # If tensorflow-gpu is installed, use that
