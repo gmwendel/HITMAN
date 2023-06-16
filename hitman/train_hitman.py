@@ -46,8 +46,8 @@ def train_hitnet(args, hit_obs, hit_hyp):
 
     train_id = 'HITNET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
 
-    #   Automatically train until validation loss does not decrease for 25 epochs
-    callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=125)]
+    #   Automatically train until validation loss does not decrease for 50 epochs
+    callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=50)]
     #   additional callbacks for saving network as a function of epoch and extra analytics
     if args.save_history:
         callbacks.append(
@@ -67,6 +67,12 @@ def train_hitnet(args, hit_obs, hit_hyp):
                       workers=2 * n_gpus)
 
     # save the trained network
+    tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
+
+    # load the network in without compiling and save with a linear activation required to get the LLH from the network
+    ###There is likely a better way to do this###
+    hitnet = tf.keras.models.load_model(args.output_network[0] + '/hitnet', compile=False)
+    hitnet.layers[-1].activation = tf.keras.activations.linear
     tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
 
     # summarize history for loss and accuracy
@@ -100,9 +106,9 @@ def train_chargenet(args, charge_obs, charge_hyp):
     else:
         batch_scale = 0
     # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (15 + batch_scale),
+    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (14 + batch_scale),
                                time_spread=0)
-    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (15 + batch_scale),
+    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (14 + batch_scale),
                              time_spread=0)
 
     with strategy.scope():
@@ -116,8 +122,8 @@ def train_chargenet(args, charge_obs, charge_hyp):
 
     train_id = 'CHARGENET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
 
-    #   Automatically train until validation loss does not decrease for 50 epochs
-    callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=50)]
+    #   Automatically train until validation loss does not decrease for 75 epochs
+    callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=75)]
     #   additional callbacks for saving network as a function of epoch and extra analytics
     if args.save_history:
         callbacks.append(
@@ -138,6 +144,14 @@ def train_chargenet(args, charge_obs, charge_hyp):
 
     # save the trained network
     tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet', save_format='tf')
+
+
+    # load the network in without compiling and save with a linear activation required to get the LLH from the network
+    ###There is likely a better way to do this###
+    chargenet = tf.keras.models.load_model(args.output_network[0] + '/chargenet', compile=False)
+    chargenet.layers[-1].activation = tf.keras.activations.linear
+    tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet', save_format='tf')
+
 
     # summarize history for loss and accuracy
     plt.plot(hist.history['loss'])
