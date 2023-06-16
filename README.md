@@ -41,7 +41,7 @@ git clone https://github.com/gmwendel/HITMAN.git
 cd HITMAN
 pip install -e .
 ```
-Verify the scripts have been added to path:
+Verify the scripts have been added to the anaconda environment:
 ```
 hitman_train -h
 hitman_reco -h
