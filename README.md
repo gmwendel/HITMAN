@@ -8,12 +8,12 @@ detectors with arbitrary geometry and optical properties.
 
 ## Installation
 
-First we must set up an anaconda environment with tensorflow installed.  Attached are Linux install instructions for x86 based systems. For 
-other OS refer to [tensorflow install instructions](https://www.tensorflow.org/install/pip)
-to install tensorflow on MacOS or Windows.
+First we must set up an anaconda environment with tensorflow installed.  Attached are Linux install instructions for x86 based systems with an nvidia GPU. For 
+other systems refer to [tensorflow install instructions](https://www.tensorflow.org/install/pip)
+to install tensorflow.
 
 
-Create a new anaconda environment and install tensorflow 2.11 prerequisites:
+Create a new anaconda environment and install tensorflow 2.11 prerequisites (used for enabling GPU computation):
 ```
 conda deactivate
 conda create -n hitman python=3.9
