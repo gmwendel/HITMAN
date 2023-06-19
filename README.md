@@ -8,7 +8,7 @@ detectors with arbitrary geometry and optical properties.
 
 ## Installation
 
-First we must set up an anaconda environment with tensorflow installed.  Attached are Linux install instructions. for 
+First we must set up an anaconda environment with tensorflow installed.  Attached are Linux install instructions for x86 based systems. For 
 other OS refer to [tensorflow install instructions](https://www.tensorflow.org/install/pip)
 to install tensorflow on MacOS or Windows.
 
