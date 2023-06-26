@@ -73,8 +73,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
     # It seems this is a known issue:
     # https://github.com/raghakot/keras-vis/blob/master/vis/utils/utils.py#L95
 
-    linear_hitnet = tf.keras.models.load_model(args.output_network[0] + '/hitnet',
-                                               custom_objects={"hitnet_trafo": hitnet_trafo})
+    linear_hitnet = tf.keras.models.load_model(args.output_network[0] + '/hitnet')
     linear_hitnet.layers[-1].activation = tf.keras.activations.linear
     tf.keras.models.save_model(linear_hitnet, args.output_network[0] + '/hitnet', save_format='tf')
 
@@ -153,8 +152,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
     # It seems this is a known issue:
     # https://github.com/raghakot/keras-vis/blob/master/vis/utils/utils.py#L95
 
-    linear_chargenet = tf.keras.models.load_model(args.output_network[0] + '/chargenet',
-                                                  custom_objects={"chargenet_trafo": chargenet_trafo})
+    linear_chargenet = tf.keras.models.load_model(args.output_network[0] + '/chargenet')
     linear_chargenet.layers[-1].activation = tf.keras.activations.linear
     tf.keras.models.save_model(linear_chargenet, args.output_network[0] + '/chargenet', save_format='tf')
 
