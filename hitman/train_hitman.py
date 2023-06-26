@@ -75,6 +75,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
 
     linear_hitnet = tf.keras.models.load_model(args.output_network[0] + '/hitnet')
     linear_hitnet.layers[-1].activation = tf.keras.activations.linear
+    linear_hitnet._name = 'hitnet'
     tf.keras.models.save_model(linear_hitnet, args.output_network[0] + '/hitnet', save_format='tf')
 
     # summarize history for loss and accuracy
@@ -155,6 +156,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
 
     linear_chargenet = tf.keras.models.load_model(args.output_network[0] + '/chargenet')
     linear_chargenet.layers[-1].activation = tf.keras.activations.linear
+    linear_chargenet._name = 'chargenet'
     tf.keras.models.save_model(linear_chargenet, args.output_network[0] + '/chargenet', save_format='tf')
 
 
