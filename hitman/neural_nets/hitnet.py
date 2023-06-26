@@ -1,7 +1,6 @@
 import tensorflow as tf
 
 
-
 class hitnet_trafo(tf.keras.layers.Layer):
     '''Class to transform inputs for Hitnet
     This layer performs two main operations. The first, a transformation from spherical to cartesian coordinates for the
@@ -87,6 +86,7 @@ class hitnet_trafo(tf.keras.layers.Layer):
 
         return out
 
+
 def mish(x):
     r"""Mish: A Self Regularized Non-Monotonic Neural Activation Function.
 
@@ -113,6 +113,7 @@ def mish(x):
     x = tf.convert_to_tensor(x)
     return x * tf.math.tanh(tf.math.softplus(x))
 
+
 def get_hitnet(activation=mish, layers=3):
     hit_input = tf.keras.Input(shape=(5,))
     params_input = tf.keras.Input(shape=(7,))
@@ -120,7 +121,7 @@ def get_hitnet(activation=mish, layers=3):
     t = hitnet_trafo()
     h = t(hit_input, params_input)
     for i in range(layers):
-        h = tf.keras.layers.Dense(256, activation=activation)(h)
+        h = tf.keras.layers.Dense(256, activation=activation, name='dense_' + str(i))(h)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid')(h)
 
     hitnet = tf.keras.Model(inputs=[hit_input, params_input], outputs=outputs)

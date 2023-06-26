@@ -104,7 +104,7 @@ def get_chargenet(activation=mish, layers=3):
     t = chargenet_trafo()
     h = t(charge_input, params_input)
     for i in range(layers):
-        h = tf.keras.layers.Dense(256, activation=activation)(h)
+        h = tf.keras.layers.Dense(256, activation=activation, name='dense_' + str(i))(h)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid')(h)
 
     chargenet = tf.keras.Model(inputs=[charge_input, params_input], outputs=outputs)
