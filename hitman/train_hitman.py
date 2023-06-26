@@ -70,7 +70,9 @@ def train_hitnet(args, hit_obs, hit_hyp):
     tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
 
     # load the network in without compiling and save with a linear activation required to get the LLH from the network
-    ###There is likely a better way to do this###
+    # It seems this is a known issue:
+    # https://github.com/raghakot/keras-vis/blob/master/vis/utils/utils.py#L95
+
     hitnet = tf.keras.models.load_model(args.output_network[0] + '/hitnet', compile=False)
     hitnet.layers[-1].activation = tf.keras.activations.linear
     tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
@@ -83,6 +85,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
     plt.xlabel('epoch')
     plt.legend(['train', 'test'], loc='upper left')
     plt.savefig(args.output_network[0] + '/hitnet.png', dpi=200)
+    plt.close()
 
 
 def train_chargenet(args, charge_obs, charge_hyp):
@@ -147,7 +150,9 @@ def train_chargenet(args, charge_obs, charge_hyp):
 
 
     # load the network in without compiling and save with a linear activation required to get the LLH from the network
-    ###There is likely a better way to do this###
+    # It seems this is a known issue:
+    # https://github.com/raghakot/keras-vis/blob/master/vis/utils/utils.py#L95
+
     chargenet = tf.keras.models.load_model(args.output_network[0] + '/chargenet', compile=False)
     chargenet.layers[-1].activation = tf.keras.activations.linear
     tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet', save_format='tf')
@@ -161,6 +166,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
     plt.xlabel('epoch')
     plt.legend(['train', 'test'], loc='upper left')
     plt.savefig(args.output_network[0] + '/chargenet.png', dpi=200)
+    plt.close()
 
 
 def get_args():
