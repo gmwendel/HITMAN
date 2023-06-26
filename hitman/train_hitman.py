@@ -14,7 +14,7 @@ def train_hitnet(args, hit_obs, hit_hyp):
     import matplotlib.pyplot as plt
     import tensorflow as tf
     import math
-    from hitman.neural_nets.hitnet import get_hitnet
+    from hitman.neural_nets.hitnet import get_hitnet, hitnet_trafo
     from hitman.tools.datagenerator import DataGenerator
 
     strategy = tf.distribute.MirroredStrategy()
@@ -73,7 +73,8 @@ def train_hitnet(args, hit_obs, hit_hyp):
     # It seems this is a known issue:
     # https://github.com/raghakot/keras-vis/blob/master/vis/utils/utils.py#L95
 
-    linear_hitnet = tf.keras.models.load_model(args.output_network[0] + '/hitnet')
+    linear_hitnet = tf.keras.models.load_model(args.output_network[0] + '/hitnet',
+                                               custom_objects={"hitnet_trafo": hitnet_trafo})
     linear_hitnet.layers[-1].activation = tf.keras.activations.linear
     linear_hitnet._name = 'hitnet'
     tf.keras.models.save_model(linear_hitnet, args.output_network[0] + '/hitnet', save_format='tf')
@@ -94,7 +95,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
     import matplotlib.pyplot as plt
     import tensorflow as tf
     import math
-    from hitman.neural_nets.chargenet import get_chargenet
+    from hitman.neural_nets.chargenet import get_chargenet, chargenet_trafo
     from hitman.tools.datagenerator import DataGenerator
 
     strategy = tf.distribute.MirroredStrategy()
@@ -149,16 +150,15 @@ def train_chargenet(args, charge_obs, charge_hyp):
     # save the trained network
     tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet', save_format='tf')
 
-
     # load the network in without compiling and save with a linear activation required to get the LLH from the network
     # It seems this is a known issue:
     # https://github.com/raghakot/keras-vis/blob/master/vis/utils/utils.py#L95
 
-    linear_chargenet = tf.keras.models.load_model(args.output_network[0] + '/chargenet')
+    linear_chargenet = tf.keras.models.load_model(args.output_network[0] + '/chargenet',
+                                                  custom_objects={"chargenet_trafo": chargenet_trafo})
     linear_chargenet.layers[-1].activation = tf.keras.activations.linear
     linear_chargenet._name = 'chargenet'
     tf.keras.models.save_model(linear_chargenet, args.output_network[0] + '/chargenet', save_format='tf')
-
 
     # summarize history for loss and accuracy
     plt.plot(hist.history['loss'])
