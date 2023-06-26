@@ -121,8 +121,8 @@ def get_hitnet(activation=mish, layers=3):
     t = hitnet_trafo()
     h = t(hit_input, params_input)
     for i in range(layers):
-        h = tf.keras.layers.Dense(256, activation=activation)(h)
-    outputs = tf.keras.layers.Dense(1, activation='sigmoid')(h)
+        h = tf.keras.layers.Dense(256, activation=activation, name='dense_' + str(i))(h)
+    outputs = tf.keras.layers.Dense(1, activation='sigmoid', name='dense_' + str(layers))(h)
 
     hitnet = tf.keras.Model(inputs=[hit_input, params_input], outputs=outputs)
 
