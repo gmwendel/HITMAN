@@ -48,9 +48,9 @@ def main():
         length = np.random.uniform(0, 1, size=(samples, 1))
         angle = np.pi * np.random.uniform(0, 2, size=(samples, 1))
 
-        x = half_r * 0.9 * np.sqrt(length) * np.cos(angle)
-        y = half_r * 0.9 * np.sqrt(length) * np.sin(angle)
-        z = np.random.uniform(-half_z * 0.9, half_z * 0.9, size=(samples, 1))
+        x = half_r * 0.9 * np.sqrt(length) * np.cos(angle) * 0
+        y = half_r * 0.9 * np.sqrt(length) * np.sin(angle) * 0
+        z = np.random.uniform(-half_z * 0.9, half_z * 0.9, size=(samples, 1)) * 0 - 500
 
         # Not Properly distribute points on surface of sphere
         zenith = np.arccos(np.random.uniform(-1, 1, size=(samples, 1)))
@@ -106,7 +106,7 @@ def main():
         all_params = []
         params = tf.convert_to_tensor(params, np.float32)
 
-        descent_rates = tf.tile([[400., 400., 400., 0.1, 0.1, 0.013, 0.006]], (len(params), 1)) * 95 / (
+        descent_rates = tf.tile([[0., 0., 0., 0.05, 0.05, 0.013, 0.0]], (len(params), 1)) * 95 / (
                 len(hits) + 7) * 0.1  # wbls best
 
         # descent_rates=tf.tile([[600.,600.,600.,0.1,0.1,0.00013,0.1]],(len(params),1))*160/(len(hits)+15)*0.1 #gentle t
@@ -161,7 +161,7 @@ def main():
     for event in events:
         # generate 'best guess'
         initial_points = best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
-                                    float(args.radius), -5, 5, 1.0, 3.0)
+                                    float(args.radius), -5, 5, 2.0, 2.0)
         event_results = eval_with_grads(event['hits'], initial_points, hitnet, event['total_charge'], chargenet)
         llhmin = np.min(event_results[2])
         llh = event_results[0].numpy()
