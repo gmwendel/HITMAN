@@ -44,30 +44,30 @@ def main():
     from hitman.tools.ratextract import DataExtractor
 
     # Generate uniform space to seed optimizer
-    def uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max):
+    def uniform_sample(samples, x, y, z, t_min, t_max, E):
         length = np.random.uniform(0, 1, size=(samples, 1))
         angle = np.pi * np.random.uniform(0, 2, size=(samples, 1))
 
-        x = half_r * 0.9 * np.sqrt(length) * np.cos(angle) * 0
-        y = half_r * 0.9 * np.sqrt(length) * np.sin(angle) * 0
-        z = np.random.uniform(-half_z * 0.9, half_z * 0.9, size=(samples, 1)) * 0 - 500
+        x = np.zeros(samples, 1) + x
+        y = np.zeros(samples, 1) + y
+        z = np.zeros(samples, 1) + z
 
         # Not Properly distribute points on surface of sphere
         zenith = np.arccos(np.random.uniform(-1, 1, size=(samples, 1)))
         azimuth = np.random.uniform(0, 2 * np.pi, size=(samples, 1))
 
         t = np.random.uniform(t_min, t_max, size=(samples, 1))
-        E = np.random.uniform(E_min, E_max, size=(samples, 1))
+        E = np.zeros(samples, 1) + E
         # stack initial points
         initial_points = np.hstack([x, y, z, zenith, azimuth, t, E]).astype(np.float32)
         return initial_points
 
     # Use random grid sampling to find best -LLH values before gradient descent
-    def best_guess(hitnet, chargenet, event, final_number, samples, half_z, half_r, t_min, t_max, E_min, E_max):
-        all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
+    def best_guess(hitnet, chargenet, event, final_number, samples, x, y, z, t_min, t_max, E):
+        all_points = uniform_sample(samples, x, y, z, t_min, t_max, E)
         all_llh = tfLLH(event['hits'], all_points, hitnet, event['total_charge'], chargenet).numpy()
         for i in range(20):
-            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
+            initial_points = uniform_sample(samples, x, y, z, t_min, t_max, E)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
             all_llh = np.hstack([all_llh, llh])
@@ -159,9 +159,17 @@ def main():
 
     # Optimize over all events loaded
     for event in events:
-        # generate 'best guess'
-        initial_points = best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
-                                    float(args.radius), -5, 5, 2.0, 2.0)
+        # generate 'best guess using true vertex and energy'
+
+        x = event['truth'][0]
+        y = event['truth'][1]
+        z = event['truth'][2]
+        E = event['truth'][6]
+
+        t_min = -5
+        t_max = 5
+
+        initial_points = best_guess(hitnet, chargenet, event, final_number, samples, x, y, z, t_min, t_max, E)
         event_results = eval_with_grads(event['hits'], initial_points, hitnet, event['total_charge'], chargenet)
         llhmin = np.min(event_results[2])
         llh = event_results[0].numpy()
