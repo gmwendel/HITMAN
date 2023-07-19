@@ -48,16 +48,16 @@ def main():
         length = np.random.uniform(0, 1, size=(samples, 1))
         angle = np.pi * np.random.uniform(0, 2, size=(samples, 1))
 
-        x = np.zeros(samples, 1) + x
-        y = np.zeros(samples, 1) + y
-        z = np.zeros(samples, 1) + z
+        x = np.zeros((samples, 1)) + x
+        y = np.zeros((samples, 1)) + y
+        z = np.zeros((samples, 1)) + z
 
         # Not Properly distribute points on surface of sphere
         zenith = np.arccos(np.random.uniform(-1, 1, size=(samples, 1)))
         azimuth = np.random.uniform(0, 2 * np.pi, size=(samples, 1))
 
         t = np.random.uniform(t_min, t_max, size=(samples, 1))
-        E = np.zeros(samples, 1) + E
+        E = np.zeros((samples, 1)) + E
         # stack initial points
         initial_points = np.hstack([x, y, z, zenith, azimuth, t, E]).astype(np.float32)
         return initial_points
