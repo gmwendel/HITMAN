@@ -80,7 +80,7 @@ class DataExtractor():
 
         del obsdata
 
-        charge_hyp = self.get_source_truth()
+        charge_hyp = self.get_truth()
 
         hit_hyp = np.repeat(charge_hyp, nhit, axis=0)
         return charge_obs, hit_obs, charge_hyp, hit_hyp
@@ -161,7 +161,7 @@ class DataExtractor():
         maps = uproot.concatenate([infile + ":meta;1" for infile in self.input_files],
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
 
-        charge_hyp = self.get_source_truth()
+        charge_hyp = self.get_truth()
 
         events = []
 
