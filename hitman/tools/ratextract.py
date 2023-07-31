@@ -85,6 +85,22 @@ class DataExtractor():
         hit_hyp = np.repeat(charge_hyp, nhit, axis=0)
         return charge_obs, hit_obs, charge_hyp, hit_hyp
 
+    def get_truth(self):
+        hypdata = uproot.concatenate(
+            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
+            filter_name=['mcx', 'mcy', 'mcz', 'mcu', 'mcv', 'mcw', 'mcke'], library='np')
+        mcaz = np.mod(np.arctan2(hypdata['mcv'], hypdata['mcu']), 2 * np.pi).astype(np.float32)
+        mcze = np.arccos(hypdata['mcw']).astype(np.float32)
+        mct = np.zeros(len(mcze), np.float32)
+        charge_hyp = np.stack([hypdata['mcx'].astype(np.float32),
+                               hypdata['mcy'].astype(np.float32),
+                               hypdata['mcz'].astype(np.float32),
+                               mcze,
+                               mcaz,
+                               mct.astype(np.float32),
+                               hypdata['mcke'].astype(np.float32)
+                               ], axis=1)
+        return charge_hyp
     def get_source_truth(self):
         # Ignores z rotation...
         sourcedata = uproot.concatenate(
