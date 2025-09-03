@@ -44,15 +44,15 @@ class DataExtractor():
     def get_hitman_train_data(self):
         obsdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcPMTNPE', 'mcPMTID', "mcPETime", "hitPMTCharge"], library='np')
+            filter_name=['mcPMTNPE', 'mcPMTID', "mcPEFrontEndTime"], library='np')
         maps = uproot.concatenate([infile + ":meta;1" for infile in self.input_files],
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
 
         n_hit = np.concatenate(obsdata['mcPMTNPE'])
         idx = np.repeat(np.concatenate(obsdata['mcPMTID']), n_hit)
-        nhit = np.array([len(hits) for hits in obsdata['mcPETime']], dtype=np.int32)
+        nhit = np.array([len(hits) for hits in obsdata['mcPEFrontEndTime']], dtype=np.int32)
         charge_obs = np.stack([
-            np.array([np.sum(charge) for charge in obsdata['hitPMTCharge']], dtype=np.float32),
+            nhit.astype(np.float32),
             nhit.astype(np.float32)
         ], axis=1
         )
@@ -60,7 +60,7 @@ class DataExtractor():
             maps['pmtX'][0][idx].astype(np.float32),
             maps['pmtY'][0][idx].astype(np.float32),
             maps['pmtZ'][0][idx].astype(np.float32),
-            np.concatenate(obsdata['mcPETime']).astype(np.float32),
+            np.concatenate(obsdata['mcPEFrontEndTime']).astype(np.float32),
             (np.zeros(len(idx)) + 1).astype(np.float32)
         ]
             , axis=1)
@@ -88,7 +88,7 @@ class DataExtractor():
     def get_hitman_reco_data(self):  # Loads data in old format using python dicts
         obsdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcPMTNPE', 'mcPMTID', "mcPETime", "hitPMTCharge"], library='np')
+            filter_name=['mcPMTNPE', 'mcPMTID', "mcPEFrontEndTime"], library='np')
         maps = uproot.concatenate([infile + ":meta;1" for infile in self.input_files],
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
 
@@ -115,7 +115,7 @@ class DataExtractor():
             idx = np.repeat(obsdata['mcPMTID'][i], n_hit)
 
             charge_obs = np.stack([
-                np.sum(obsdata['hitPMTCharge'][i]),
+                np.sum(n_hit),
                 np.sum(n_hit)
             ]
             )
@@ -123,7 +123,7 @@ class DataExtractor():
                 maps['pmtX'][0][idx].astype(np.float32),
                 maps['pmtY'][0][idx].astype(np.float32),
                 maps['pmtZ'][0][idx].astype(np.float32),
-                obsdata['mcPETime'][i].astype(np.float32),
+                obsdata['mcPEFrontEndTime'][i].astype(np.float32),
                 (np.zeros(len(idx)) + 1).astype(np.float32)
             ]
                 , axis=1)
@@ -133,6 +133,5 @@ class DataExtractor():
                 "total_charge": charge_obs,
                 "truth": charge_hyp[i]
             }
-            if len(obsdata['hitPMTCharge'][i])>3:
-                events.append(event)
+            events.append(event)
         return events
