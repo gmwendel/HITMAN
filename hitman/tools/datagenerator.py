@@ -10,7 +10,7 @@ class DataGenerator(tf.keras.utils.Sequence):
         self.params = np.array(t)
 
         # spread absolute time values (for hitnet)
-        if len(self.data[0]) > 4:
+        if len(self.data[0]) > 4 and len(self.params[0]) > 5:
             time_shifts = np.random.normal(0, time_spread, len(self.data))
             self.data[:, 3] += time_shifts
             self.params[:, 5] += time_shifts

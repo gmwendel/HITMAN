@@ -34,7 +34,7 @@ def train_hitnet(args, hit_obs, hit_hyp, hyp_norm, obs_norm):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.001)
+    optimizer = tf.keras.optimizers.Adam(args.lr)
 
     # Take 1/10 total data and make it validation
     splits = int(len(hit_obs) / 10)
@@ -44,18 +44,18 @@ def train_hitnet(args, hit_obs, hit_hyp, hyp_norm, obs_norm):
     else:
         batch_scale = 0
     # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(hit_obs[0:-splits], hit_hyp[0:-splits], batch_size=2 ** (17 + batch_scale),
+    Train_Data = DataGenerator(hit_obs[0:-splits], hit_hyp[0:-splits], batch_size=2 ** (args.batch_power_hitnet + batch_scale),
                                time_spread=args.t_shuffle)
-    Val_Data = DataGenerator(hit_obs[-splits:-1], hit_hyp[-splits:-1], batch_size=2 ** (17 + batch_scale),
+    Val_Data = DataGenerator(hit_obs[-splits:-1], hit_hyp[-splits:-1], batch_size=2 ** (args.batch_power_hitnet + batch_scale),
                              time_spread=args.t_shuffle)
 
     with strategy.scope():
         # Everything that creates variables should be under the strategy scope.
         # In general this is only model construction & `compile()`.
         if args.use_relu:
-            hitnet = get_hitnet(activation='relu', hyp_norm=hyp_norm, obs_norm=obs_norm)
+            hitnet = get_hitnet(activation='relu', layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, obs_norm=obs_norm)
         else:
-            hitnet = get_hitnet(hyp_norm=hyp_norm, obs_norm=obs_norm)
+            hitnet = get_hitnet(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, obs_norm=obs_norm)
         hitnet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=False)
 
     train_id = 'HITNET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
@@ -102,7 +102,7 @@ def train_hitnet(args, hit_obs, hit_hyp, hyp_norm, obs_norm):
     plt.close()
 
 
-def train_chargenet(args, charge_obs, charge_hyp):
+def train_chargenet(args, charge_obs, charge_hyp, hyp_norm, obs_norm):
     import datetime
     import matplotlib.pyplot as plt
     import tensorflow as tf
@@ -113,7 +113,7 @@ def train_chargenet(args, charge_obs, charge_hyp):
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
-    optimizer = tf.keras.optimizers.Adam(0.0001)
+    optimizer = tf.keras.optimizers.Adam(args.lr * 0.1)
 
     # Take 1/10 total data and make it validation
     splits = int(len(charge_obs) / 10)
@@ -123,18 +123,18 @@ def train_chargenet(args, charge_obs, charge_hyp):
     else:
         batch_scale = 0
     # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (14 + batch_scale),
+    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (args.batch_power_chargenet + batch_scale),
                                time_spread=0)
-    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (14 + batch_scale),
+    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (args.batch_power_chargenet + batch_scale),
                              time_spread=0)
 
     with strategy.scope():
         # Everything that creates variables should be under the strategy scope.
         # In general this is only model construction & `compile()`.
         if args.use_relu:
-            chargenet = get_chargenet(activation='relu')
+            chargenet = get_chargenet(activation='relu', layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, obs_norm=obs_norm)
         else:
-            chargenet = get_chargenet()
+            chargenet = get_chargenet(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, obs_norm=obs_norm)
         chargenet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=False)
 
     train_id = 'CHARGENET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")
@@ -199,8 +199,12 @@ def get_args():
                         help='Type = Boolean.  Optional; Use the relu activation function instead of mish; Default = False')
     parser.add_argument('--save_history', default=False, action="store_true",
                         help="Type = Boolean.  Optional; Add flag to save network at each epoch and enable Tensorboard stats in 'resource' folder ; Default = False")
+    parser.add_argument('--layers', default=3, type=int, help='Number of hidden layers')
+    parser.add_argument('--nodes', default=256, type=int, help='Nodes per hidden layer')
+    parser.add_argument('--batch_power_hitnet', default=17, type=int, help='Base 2 power for HitNet batch size')
+    parser.add_argument('--batch_power_chargenet', default=14, type=int, help='Base 2 power for ChargeNet batch size')
+    parser.add_argument('--lr', default=0.001, type=float, help='Learning rate')
     return parser.parse_args()
-
 
 if __name__ == '__main__':
     main()
