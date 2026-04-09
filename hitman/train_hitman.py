@@ -1,15 +1,29 @@
 def main():
     args = get_args()
     from hitman.tools.ratextract import DataExtractor
+    import numpy as np
     # load data
     Data = DataExtractor(args.input_files)
     charge_obs, hit_obs, charge_hyp, hit_hyp = Data.get_hitman_train_data()
+    
+    # Calculate norms dynamically
+    charge_obs_norm = np.stack([np.std(charge_obs, axis=0), np.mean(charge_obs, axis=0)])
+    charge_hyp_norm = np.stack([np.std(charge_hyp, axis=0), np.mean(charge_hyp, axis=0)])
+    hit_obs_norm = np.stack([np.std(hit_obs, axis=0), np.mean(hit_obs, axis=0)])
+    hit_hyp_norm = np.stack([np.std(hit_hyp, axis=0), np.mean(hit_hyp, axis=0)])
+    
+    # Prevent division by zero for constants
+    charge_obs_norm[0][charge_obs_norm[0] == 0] = 1.0
+    charge_hyp_norm[0][charge_hyp_norm[0] == 0] = 1.0
+    hit_obs_norm[0][hit_obs_norm[0] == 0] = 1.0
+    hit_hyp_norm[0][hit_hyp_norm[0] == 0] = 1.0
+
     print("Data Loaded")
-    train_hitnet(args, hit_obs, hit_hyp)
-    train_chargenet(args, charge_obs, charge_hyp)
+    train_hitnet(args, hit_obs, hit_hyp, hit_hyp_norm, hit_obs_norm)
+    train_chargenet(args, charge_obs, charge_hyp, charge_hyp_norm, charge_obs_norm)
 
 
-def train_hitnet(args, hit_obs, hit_hyp):
+def train_hitnet(args, hit_obs, hit_hyp, hyp_norm, obs_norm):
     import datetime
     import matplotlib.pyplot as plt
     import tensorflow as tf
@@ -39,9 +53,9 @@ def train_hitnet(args, hit_obs, hit_hyp):
         # Everything that creates variables should be under the strategy scope.
         # In general this is only model construction & `compile()`.
         if args.use_relu:
-            hitnet = get_hitnet(activation='relu')
+            hitnet = get_hitnet(activation='relu', hyp_norm=hyp_norm, obs_norm=obs_norm)
         else:
-            hitnet = get_hitnet()
+            hitnet = get_hitnet(hyp_norm=hyp_norm, obs_norm=obs_norm)
         hitnet.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'], jit_compile=False)
 
     train_id = 'HITNET' + datetime.datetime.now().strftime("%d_%b_%Y-%Hh%M")

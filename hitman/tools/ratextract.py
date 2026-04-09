@@ -69,17 +69,10 @@ class DataExtractor():
 
         hypdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcx', 'mcy', 'mcz', 'mcu', 'mcv', 'mcw', 'mcke'], library='np')
-        mcaz = np.mod(np.arctan2(hypdata['mcv'], hypdata['mcu']), 2 * np.pi).astype(np.float32)
-        mcze = np.arccos(hypdata['mcw']).astype(np.float32)
-        mct = np.zeros(len(mcze), np.float32)
-        charge_hyp = np.stack([hypdata['mcx'].astype(np.float32),
-                               hypdata['mcy'].astype(np.float32),
-                               hypdata['mcz'].astype(np.float32),
-                               mcze,
-                               mcaz,
-                               mct.astype(np.float32),
-                               hypdata['mcke'].astype(np.float32)
+            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
+        charge_hyp = np.stack([hypdata['mcke'].astype(np.float32),
+                               hypdata['scintmod_scat_len'].astype(np.float32),
+                               hypdata['scintmod_abs_len'].astype(np.float32)
                                ], axis=1)
 
         hit_hyp = np.repeat(charge_hyp, nhit, axis=0)
@@ -94,22 +87,15 @@ class DataExtractor():
 
         hypdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcx', 'mcy', 'mcz', 'mcu', 'mcv', 'mcw', 'mcke'], library='np')
-        mcaz = np.mod(np.arctan2(hypdata['mcv'], hypdata['mcu']), 2 * np.pi).astype(np.float32)
-        mcze = mcze = np.arccos(hypdata['mcw']).astype(np.float32)
-        mct = np.zeros(len(mcze), np.float32)
-        charge_hyp = np.stack([hypdata['mcx'].astype(np.float32),
-                               hypdata['mcy'].astype(np.float32),
-                               hypdata['mcz'].astype(np.float32),
-                               mcze,
-                               mcaz,
-                               mct.astype(np.float32),
-                               hypdata['mcke'].astype(np.float32)
+            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
+        charge_hyp = np.stack([hypdata['mcke'].astype(np.float32),
+                               hypdata['scintmod_scat_len'].astype(np.float32),
+                               hypdata['scintmod_abs_len'].astype(np.float32)
                                ], axis=1)
 
         events = []
 
-        for i in range(len(mcze)):
+        for i in range(len(charge_hyp)):
 
             n_hit = obsdata['mcPMTNPE'][i]
             idx = np.repeat(obsdata['mcPMTID'][i], n_hit)
@@ -135,3 +121,4 @@ class DataExtractor():
             }
             events.append(event)
         return events
+
