@@ -44,30 +44,19 @@ def main():
     from hitman.tools.ratextract import DataExtractor
 
     # Generate uniform space to seed optimizer
-    def uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max):
-        length = np.random.uniform(0, 1, size=(samples, 1))
-        angle = np.pi * np.random.uniform(0, 2, size=(samples, 1))
-
-        x = half_r * 0.9 * np.sqrt(length) * np.cos(angle)
-        y = half_r * 0.9 * np.sqrt(length) * np.sin(angle)
-        z = np.random.uniform(-half_z * 0.9, half_z * 0.9, size=(samples, 1))
-
-        # Not Properly distribute points on surface of sphere
-        zenith = np.arccos(np.random.uniform(-1, 1, size=(samples, 1)))
-        azimuth = np.random.uniform(0, 2 * np.pi, size=(samples, 1))
-
-        t = np.random.uniform(t_min, t_max, size=(samples, 1))
-        E = np.random.uniform(E_min, E_max, size=(samples, 1))
-        # stack initial points
-        initial_points = np.hstack([x, y, z, zenith, azimuth, t, E]).astype(np.float32)
+    def uniform_sample(samples, e_min=0.1, e_max=0.6, scat_min=0.2, scat_max=1.0, abs_min=2000.0, abs_max=15000.0):
+        energy = np.random.uniform(e_min, e_max, size=(samples, 1))
+        scat = np.random.uniform(scat_min, scat_max, size=(samples, 1))
+        abs_len = np.random.uniform(abs_min, abs_max, size=(samples, 1))
+        initial_points = np.hstack([energy, scat, abs_len]).astype(np.float32)
         return initial_points
 
     # Use random grid sampling to find best -LLH values before gradient descent
-    def best_guess(hitnet, chargenet, event, final_number, samples, half_z, half_r, t_min, t_max, E_min, E_max):
-        all_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
+    def best_guess(hitnet, chargenet, event, final_number, samples):
+        all_points = uniform_sample(samples)
         all_llh = tfLLH(event['hits'], all_points, hitnet, event['total_charge'], chargenet).numpy()
         for i in range(20):
-            initial_points = uniform_sample(samples, half_z, half_r, t_min, t_max, E_min, E_max)
+            initial_points = uniform_sample(samples)
             llh = tfLLH(event['hits'], initial_points, hitnet, event['total_charge'], chargenet).numpy()
             all_points = np.vstack([all_points, initial_points])
             all_llh = np.hstack([all_llh, llh])
@@ -82,36 +71,19 @@ def main():
         p = tf.tile(theta, (hits.shape[0], 1))
         c = tf.repeat([charge], num_params, axis=0)
         NLLH = -hitnet([h, p])
-        #    print(theta)
         out = tf.reshape(NLLH, (hits.shape[0], theta.shape[0]))
         out = tf.math.reduce_sum(out, axis=0)
         out = out - tf.transpose(chargenet([c, theta]))
         return out[0]
 
-    # Spherical coordinates are cyclic, fix going beyond bounds.  e.g. azimuth 3pi = pi
-    def proper_dir(zenith, azimuth):
-
-        u = np.sin(zenith) * np.cos(azimuth)
-        v = np.sin(zenith) * np.sin(azimuth)
-        w = np.cos(zenith)
-        az = np.arctan2(v, u)
-        az = np.less(az, 0) * 2 * np.pi + az
-        ze = np.arccos(w)
-
-        return ze, az
-
-    # Where the magic happens, gradient descent optimizer, need option for wbls vs water since step size changes
+    # Where the magic happens, gradient descent optimizer
     def eval_with_grads(hits, params, hitnet, charge, chargenet, printall=False):
         all_llhs = []
         all_params = []
         params = tf.convert_to_tensor(params, np.float32)
 
-        descent_rates = tf.tile([[400., 400., 400., 0.1, 0.1, 0.013, 0.006]], (len(params), 1)) * 95 / (
-                len(hits) + 7) * 0.1  # wbls best
-
-        # descent_rates=tf.tile([[600.,600.,600.,0.1,0.1,0.00013,0.1]],(len(params),1))*160/(len(hits)+15)*0.1 #gentle t
-        # descent_rates = tf.tile([[800., 800., 800., 0.01, 0.01, 0.013, 0.003]], (len(params), 1)) * 0.25 * 95 / (
-        # len(hits) + 15)  # water best
+        # Descent rates tuned roughly for the optical parameters [Energy, Scat, Abs]
+        descent_rates = tf.tile([[0.005, 0.005, 100.0]], (len(params), 1)) * 95 / (len(hits) + 7) * 0.1
 
         for i in range(0, 250):
             with tf.GradientTape() as g:
@@ -122,7 +94,7 @@ def main():
 
             all_llhs.append(llhs.numpy())
             all_params.append(params.numpy())
-            params = params - descent_rates * grads  # relu
+            params = params - descent_rates * grads
 
         return llhs, params, all_llhs, all_params
 
@@ -160,8 +132,7 @@ def main():
     # Optimize over all events loaded
     for event in events:
         # generate 'best guess'
-        initial_points = best_guess(hitnet, chargenet, event, final_number, samples, float(args.half_height),
-                                    float(args.radius), -5, 5, 1.0, 3.0)
+        initial_points = best_guess(hitnet, chargenet, event, final_number, samples)
         event_results = eval_with_grads(event['hits'], initial_points, hitnet, event['total_charge'], chargenet)
         llhmin = np.min(event_results[2])
         llh = event_results[0].numpy()
@@ -172,7 +143,6 @@ def main():
         # Add reco to file
 
         event['reco'] = event_results[3][a[0]][b[0]]
-        event['reco'][3:5] = proper_dir(event['reco'][3], event['reco'][4])
         event['reco_LLH'] = llhmin
 
         print('reconstruction finished for event #' + str(i))
