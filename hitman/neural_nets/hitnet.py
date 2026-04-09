@@ -70,14 +70,14 @@ def mish(x):
     return x * tf.math.tanh(tf.math.softplus(x))
 
 
-def get_hitnet(activation=mish, layers=3, hyp_norm=None, obs_norm=None):
+def get_hitnet(activation=mish, layers=3, nodes=256, hyp_norm=None, obs_norm=None):
     hit_input = tf.keras.Input(shape=(5,))
     params_input = tf.keras.Input(shape=(3,))
 
     t = hitnet_trafo(hyp_norm=hyp_norm, obs_norm=obs_norm)
     h = t(hit_input, params_input)
     for i in range(layers):
-        h = tf.keras.layers.Dense(256, activation=activation, name='dense_' + str(i))(h)
+        h = tf.keras.layers.Dense(nodes, activation=activation, name='dense_' + str(i))(h)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid', name='dense_' + str(layers))(h)
 
     hitnet = tf.keras.Model(inputs=[hit_input, params_input], outputs=outputs)

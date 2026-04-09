@@ -68,14 +68,14 @@ def mish(x):
     x = tf.convert_to_tensor(x)
     return x * tf.math.tanh(tf.math.softplus(x))
 
-def get_chargenet(activation=mish, layers=3, hyp_norm=None, obs_norm=None):
+def get_chargenet(activation=mish, layers=3, nodes=256, hyp_norm=None, obs_norm=None):
     charge_input = tf.keras.Input(shape=(2,))
     params_input = tf.keras.Input(shape=(3,))
 
     t = chargenet_trafo(hyp_norm=hyp_norm, obs_norm=obs_norm)
     h = t(charge_input, params_input)
     for i in range(layers):
-        h = tf.keras.layers.Dense(256, activation=activation, name='dense_' + str(i))(h)
+        h = tf.keras.layers.Dense(nodes, activation=activation, name='dense_' + str(i))(h)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid', name='dense_' + str(layers))(h)
 
     chargenet = tf.keras.Model(inputs=[charge_input, params_input], outputs=outputs)
