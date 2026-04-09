@@ -82,8 +82,15 @@ class DataGenerator(tf.keras.utils.Sequence):
 
         d_X = np.concatenate([x, x], axis=0)
         d_T = np.concatenate([t, tr], axis=0)
+        
+        # Dynamically generate labels to match current batch size
+        cur_batch = len(x)
+        d_labels = np.concatenate([
+            np.ones((cur_batch, 1), dtype=d_X.dtype),
+            np.zeros((cur_batch, 1), dtype=d_X.dtype)
+        ])
 
-        d_X, d_T, d_labels = self.unison_shuffled_copies(d_X, d_T, self._labels)
+        d_X, d_T, d_labels = self.unison_shuffled_copies(d_X, d_T, d_labels)
 
         return (d_X, d_T), d_labels
 
