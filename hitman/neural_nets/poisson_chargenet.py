@@ -4,8 +4,8 @@ import numpy as np
 class poisson_chargenet_trafo(tf.keras.layers.Layer):
     '''Class to transform inputs for Poisson Charge Net'''
     
-    def __init__(self, hyp_norm=None, obs_norm=None):
-        super().__init__()
+    def __init__(self, hyp_norm=None, obs_norm=None, **kwargs):
+        super().__init__(**kwargs)
         self.hyp_norm = hyp_norm
         self.obs_norm = obs_norm
 
@@ -28,9 +28,6 @@ class poisson_chargenet_trafo(tf.keras.layers.Layer):
             shape (N, 3), containing energy, scattering length, and absorption length
         '''
         
-        # Calculate distance R from the origin (0,0,0) to the PMT
-        r = tf.sqrt(tf.reduce_sum(tf.square(pmt_pos), axis=1, keepdims=True))
-        
         # Normalization
         pmt_normed = pmt_pos
         if self.obs_norm is not None:
@@ -40,7 +37,7 @@ class poisson_chargenet_trafo(tf.keras.layers.Layer):
         if self.hyp_norm is not None:
             params_normed = (params - self.hyp_norm[1]) / self.hyp_norm[0]
             
-        out = tf.concat([pmt_normed, r / 1000.0, params_normed], axis=1)
+        out = tf.concat([pmt_normed, params_normed], axis=1)
         return out
 
 def mish(x):
