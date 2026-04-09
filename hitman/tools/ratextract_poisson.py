@@ -7,6 +7,9 @@ class PoissonDataExtractor(DataExtractor):
         super().__init__(input_files)
 
     def get_poisson_train_data(self):
+        # First, grab the standard hit data
+        _, hit_obs, charge_hyp, hit_hyp = super().get_hitman_train_data()
+        
         obsdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
             filter_name=['mcPMTNPE', 'mcPMTID'], library='np')
@@ -20,16 +23,6 @@ class PoissonDataExtractor(DataExtractor):
         ], axis=1)
         
         N_sensors = len(pmt_positions)
-        
-        hypdata = uproot.concatenate(
-            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
-        
-        charge_hyp = np.stack([hypdata['mcke'].astype(np.float32),
-                               hypdata['scintmod_scat_len'].astype(np.float32),
-                               hypdata['scintmod_abs_len'].astype(np.float32)
-                               ], axis=1)
-        
         N_events = len(charge_hyp)
         
         # Aggregate event hits into a static array (N_events, N_sensors)
@@ -42,9 +35,11 @@ class PoissonDataExtractor(DataExtractor):
             # Accumulate charge for each PMT, defaults to 0
             np.add.at(charges[i], pmt_ids, pmt_npes)
             
-        return charges, charge_hyp, pmt_positions
+        return charges, charge_hyp, pmt_positions, hit_obs, hit_hyp
 
     def get_poisson_reco_data(self):
+        events_nre = super().get_hitman_reco_data()
+        
         obsdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
             filter_name=['mcPMTNPE', 'mcPMTID'], library='np')
@@ -58,17 +53,7 @@ class PoissonDataExtractor(DataExtractor):
         ], axis=1)
         
         N_sensors = len(pmt_positions)
-        
-        hypdata = uproot.concatenate(
-            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
-            
-        charge_hyp = np.stack([hypdata['mcke'].astype(np.float32),
-                               hypdata['scintmod_scat_len'].astype(np.float32),
-                               hypdata['scintmod_abs_len'].astype(np.float32)
-                               ], axis=1)
-                               
-        N_events = len(charge_hyp)
+        N_events = len(events_nre)
         events = []
         
         for i in range(N_events):
@@ -79,8 +64,10 @@ class PoissonDataExtractor(DataExtractor):
             
             event = {
                 "charges": charges,
-                "truth": charge_hyp[i],
-                "pmt_positions": pmt_positions
+                "truth": events_nre[i]['truth'],
+                "pmt_positions": pmt_positions,
+                "hits": events_nre[i]['hits'],
+                "total_charge": events_nre[i]['total_charge']
             }
             events.append(event)
             

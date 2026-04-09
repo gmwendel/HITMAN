@@ -45,6 +45,26 @@ class DataGenerator(tf.keras.utils.Sequence):
 
         return hyp_norm, obs_norm
 
+    def shuffle_params_inDOM(self):
+        pmt_coords = self.data[:, 0:3]
+        unique_coords, inverse_indices = np.unique(pmt_coords, axis=0, return_inverse=True)
+        
+        sort_idx = np.argsort(inverse_indices)
+        sorted_params = self.params[sort_idx]
+        sorted_inv = inverse_indices[sort_idx]
+        
+        _, counts = np.unique(sorted_inv, return_counts=True)
+        split_idx = np.cumsum(counts)[:-1]
+        
+        grouped_params = np.split(sorted_params, split_idx)
+        shuffled_grouped_params = [np.random.permutation(g) for g in grouped_params]
+        shuffled_sorted_params = np.concatenate(shuffled_grouped_params)
+        
+        unsort_idx = np.empty_like(sort_idx)
+        unsort_idx[sort_idx] = np.arange(len(sort_idx))
+        
+        self.shuffled_params = shuffled_sorted_params[unsort_idx]
+
     def on_epoch_end(self):
         'Updates indexes after each epoch'
         np.random.shuffle(self.indexes)  # mix between batches
