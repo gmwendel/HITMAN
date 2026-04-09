@@ -110,7 +110,13 @@ def main():
     chargenet.layers[-1].activation = tf.keras.activations.linear
 
     # Load data for reconstruction
-    Data = DataExtractor(args.input_files)
+    import glob
+    expanded_files = []
+    for f in args.input_files:
+        expanded_files.extend(glob.glob(f))
+    expanded_files = sorted(expanded_files)
+    
+    Data = DataExtractor(expanded_files)
     events = Data.get_hitman_reco_data()
     print('data loaded')
     print(len(events))

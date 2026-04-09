@@ -2,8 +2,15 @@ def main():
     args = get_args()
     from hitman.tools.ratextract import DataExtractor
     import numpy as np
+    import glob
+    
+    expanded_files = []
+    for f in args.input_files:
+        expanded_files.extend(glob.glob(f))
+    expanded_files = sorted(expanded_files)
+    
     # load data
-    Data = DataExtractor(args.input_files)
+    Data = DataExtractor(expanded_files)
     charge_obs, hit_obs, charge_hyp, hit_hyp = Data.get_hitman_train_data()
     
     # Calculate norms dynamically
@@ -78,7 +85,7 @@ def train_hitnet(args, hit_obs, hit_hyp, hyp_norm, obs_norm):
                       callbacks=callbacks,
                       use_multiprocessing=True,
                       max_queue_size=512,
-                      workers=2 * n_gpus)
+                      workers=16)
 
     # save the trained network
     tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')

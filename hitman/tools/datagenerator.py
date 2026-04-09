@@ -9,6 +9,11 @@ class DataGenerator(tf.keras.utils.Sequence):
         self.data = np.array(x)
         self.params = np.array(t)
 
+        self._labels = np.concatenate([
+            np.ones((self.batch_size, 1), dtype=self.data.dtype),
+            np.zeros((self.batch_size, 1), dtype=self.data.dtype)
+        ])
+
         # spread absolute time values (for hitnet)
         if len(self.data[0]) > 4 and len(self.params[0]) > 5:
             time_shifts = np.random.normal(0, time_spread, len(self.data))
@@ -55,14 +60,10 @@ class DataGenerator(tf.keras.utils.Sequence):
         else:
             tr = np.take(self.shuffled_params, indexes_temp, axis=0)
 
-        d_true_labels = np.ones((self.batch_size, 1), dtype=x.dtype)
-        d_false_labels = np.zeros((self.batch_size, 1), dtype=x.dtype)
+        d_X = np.concatenate([x, x], axis=0)
+        d_T = np.concatenate([t, tr], axis=0)
 
-        d_X = np.append(x, x, axis=0)
-        d_T = np.append(t, tr, axis=0)
-        d_labels = np.append(d_true_labels, d_false_labels)
-
-        d_X, d_T, d_labels = self.unison_shuffled_copies(d_X, d_T, d_labels)
+        d_X, d_T, d_labels = self.unison_shuffled_copies(d_X, d_T, self._labels)
 
         return (d_X, d_T), d_labels
 
