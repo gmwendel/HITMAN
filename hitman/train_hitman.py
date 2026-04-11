@@ -36,25 +36,30 @@ def train_hitnet(args, hit_obs, hit_hyp, hyp_norm, obs_norm):
     import tensorflow as tf
     import math
     from hitman.neural_nets.hitnet import get_hitnet, hitnet_trafo
-    from hitman.tools.datagenerator import DataGenerator
+    from hitman.tools.datagenerator import get_hitnet_dataset
 
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
     optimizer = tf.keras.optimizers.Adam(args.lr)
 
-    # Take 1/10 total data and make it validation
-    splits = int(len(hit_obs) / 10)
     # Scale batch size with number of GPUs
     if n_gpus > 0:
         batch_scale = int(math.log(n_gpus, 2))
     else:
         batch_scale = 0
-    # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(hit_obs[0:-splits], hit_hyp[0:-splits], batch_size=2 ** (args.batch_power_hitnet + batch_scale),
-                               time_spread=args.t_shuffle)
-    Val_Data = DataGenerator(hit_obs[-splits:-1], hit_hyp[-splits:-1], batch_size=2 ** (args.batch_power_hitnet + batch_scale),
-                             time_spread=args.t_shuffle)
+        
+    N_hits = len(hit_obs)
+    val_hits_num = max(1, int(N_hits * 0.1))
+    train_hits_num = N_hits - val_hits_num
+    
+    half_batch_h = (2**(args.batch_power_hitnet + batch_scale)) // 2
+    steps_train_h = int(train_hits_num / half_batch_h)
+    steps_val_h = max(1, int(val_hits_num / half_batch_h))
+
+    # Generate Training and Validation Datasets natively
+    Train_Data = get_hitnet_dataset(hit_obs, hit_hyp, batch_size=2**(args.batch_power_hitnet + batch_scale), shuffle='inDOM', time_spread=args.t_shuffle, split='train', val_fraction=0.1)
+    Val_Data = get_hitnet_dataset(hit_obs, hit_hyp, batch_size=2**(args.batch_power_hitnet + batch_scale), shuffle='inDOM', time_spread=args.t_shuffle, split='val', val_fraction=0.1)
 
     with strategy.scope():
         # Everything that creates variables should be under the strategy scope.
@@ -81,11 +86,10 @@ def train_hitnet(args, hit_obs, hit_hyp, hyp_norm, obs_norm):
     hist = hitnet.fit(x=Train_Data,
                       validation_data=Val_Data,
                       epochs=int(args.epochs),
+                      steps_per_epoch=steps_train_h,
+                      validation_steps=steps_val_h,
                       verbose=2,
-                      callbacks=callbacks,
-                      use_multiprocessing=True,
-                      max_queue_size=512,
-                      workers=16)
+                      callbacks=callbacks)
 
     # save the trained network
     tf.keras.models.save_model(hitnet, args.output_network[0] + '/hitnet', save_format='tf')
@@ -115,25 +119,30 @@ def train_chargenet(args, charge_obs, charge_hyp, hyp_norm, obs_norm):
     import tensorflow as tf
     import math
     from hitman.neural_nets.chargenet import get_chargenet, chargenet_trafo
-    from hitman.tools.datagenerator import DataGenerator
+    from hitman.tools.datagenerator import get_chargenet_dataset
 
     strategy = tf.distribute.MirroredStrategy()
     n_gpus = strategy.num_replicas_in_sync
     print("Number of devices: {}".format(n_gpus))
     optimizer = tf.keras.optimizers.Adam(args.lr * 0.1)
 
-    # Take 1/10 total data and make it validation
-    splits = int(len(charge_obs) / 10)
     # Scale batch size with number of GPUs
     if n_gpus > 1:
         batch_scale = int(math.log(n_gpus, 2))
     else:
         batch_scale = 0
-    # Generate Training and Validation Datasets
-    Train_Data = DataGenerator(charge_obs[0:-splits], charge_hyp[0:-splits], batch_size=2 ** (args.batch_power_chargenet + batch_scale),
-                               time_spread=0)
-    Val_Data = DataGenerator(charge_obs[-splits:-1], charge_hyp[-splits:-1], batch_size=2 ** (args.batch_power_chargenet + batch_scale),
-                             time_spread=0)
+        
+    N_events = len(charge_obs)
+    val_events_num = max(1, int(N_events * 0.1))
+    train_events_num = N_events - val_events_num
+    
+    half_batch_c = (2**(args.batch_power_chargenet + batch_scale)) // 2
+    steps_train_c = int(train_events_num / half_batch_c)
+    steps_val_c = max(1, int(val_events_num / half_batch_c))
+
+    # Generate Training and Validation Datasets natively on tf.data graph
+    Train_Data = get_chargenet_dataset(charge_obs, charge_hyp, batch_size=2**(args.batch_power_chargenet + batch_scale), split='train', val_fraction=0.1)
+    Val_Data = get_chargenet_dataset(charge_obs, charge_hyp, batch_size=2**(args.batch_power_chargenet + batch_scale), split='val', val_fraction=0.1)
 
     with strategy.scope():
         # Everything that creates variables should be under the strategy scope.
@@ -160,11 +169,10 @@ def train_chargenet(args, charge_obs, charge_hyp, hyp_norm, obs_norm):
     hist = chargenet.fit(x=Train_Data,
                          validation_data=Val_Data,
                          epochs=int(args.epochs),
+                         steps_per_epoch=steps_train_c,
+                         validation_steps=steps_val_c,
                          verbose=2,
-                         callbacks=callbacks,
-                         use_multiprocessing=True,
-                         max_queue_size=512,
-                         workers=2 * n_gpus)
+                         callbacks=callbacks)
 
     # save the trained network
     tf.keras.models.save_model(chargenet, args.output_network[0] + '/chargenet', save_format='tf')
