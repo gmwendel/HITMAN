@@ -37,6 +37,42 @@ class PoissonDataExtractor(DataExtractor):
             
         return charges, charge_hyp, pmt_positions, hit_obs, hit_hyp
 
+    def get_poisson_only_train_data(self):
+        # Optimized loading: exclusively load necessary arrays, entirely skipping the massive mcPEFrontEndTime
+        obsdata = uproot.concatenate(
+            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
+            filter_name=['mcPMTNPE', 'mcPMTID'], library='np')
+        maps = uproot.concatenate([self.input_files[0] + ":meta;1"],
+                                  filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
+        hypdata = uproot.concatenate(
+            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
+            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
+        
+        pmt_positions = np.stack([
+            maps['pmtX'][0].astype(np.float32),
+            maps['pmtY'][0].astype(np.float32),
+            maps['pmtZ'][0].astype(np.float32)
+        ], axis=1)
+        
+        charge_hyp = np.stack([hypdata['mcke'].astype(np.float32),
+                               hypdata['scintmod_scat_len'].astype(np.float32),
+                               hypdata['scintmod_abs_len'].astype(np.float32)
+                               ], axis=1)
+
+        N_sensors = len(pmt_positions)
+        N_events = len(charge_hyp)
+        
+        # Vectorized charge accumulation (bypassing slow Python loops over N_events)
+        event_lengths = np.array([len(x) for x in obsdata['mcPMTID']], dtype=np.int32)
+        event_indices = np.repeat(np.arange(N_events), event_lengths)
+        flat_pmt_ids = np.concatenate(obsdata['mcPMTID'])
+        flat_npes = np.concatenate(obsdata['mcPMTNPE'])
+        
+        charges = np.zeros((N_events, N_sensors), dtype=np.float32)
+        np.add.at(charges, (event_indices, flat_pmt_ids), flat_npes)
+            
+        return charges, charge_hyp, pmt_positions
+
     def get_poisson_reco_data(self):
         events_nre = super().get_hitman_reco_data()
         

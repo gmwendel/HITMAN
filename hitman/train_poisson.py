@@ -5,7 +5,7 @@ import tensorflow as tf
 import os
 import glob
 from hitman.tools.ratextract_poisson import PoissonDataExtractor
-from hitman.tools.poisson_datagenerator import PoissonDataGenerator
+from hitman.tools.poisson_datagenerator import get_poisson_dataset
 from hitman.tools.datagenerator import DataGenerator
 from hitman.neural_nets.poisson_chargenet import get_poisson_chargenet, poisson_nll_loss
 from hitman.neural_nets.hitnet import get_hitnet
@@ -42,6 +42,7 @@ def main():
     # ==========================================
     # Train Poisson ChargeNet
     # ==========================================
+    '''
     print("----- Training Poisson ChargeNet -----")
     hyp_norm_charge = np.stack([np.std(charge_hyp, axis=0), np.mean(charge_hyp, axis=0)])
     obs_norm_charge = np.stack([np.std(pmt_positions, axis=0), np.mean(pmt_positions, axis=0)])
@@ -49,12 +50,15 @@ def main():
     hyp_norm_charge[0][hyp_norm_charge[0] == 0] = 1.0
     obs_norm_charge[0][obs_norm_charge[0] == 0] = 1.0
     
-    splits_c = max(1, int(len(charges) / 10))
-    train_charges, val_charges = charges[:-splits_c], charges[-splits_c:]
-    train_charge_hyp, val_charge_hyp = charge_hyp[:-splits_c], charge_hyp[-splits_c:]
+    N_events = len(charges)
+    val_events = max(1, int(N_events * 0.1))
+    train_events = N_events - val_events
     
-    train_gen_c = PoissonDataGenerator(train_charges, train_charge_hyp, pmt_positions, batch_size=2**args.batch_power)
-    val_gen_c = PoissonDataGenerator(val_charges, val_charge_hyp, pmt_positions, batch_size=2**args.batch_power)
+    steps_train = int(train_events * len(pmt_positions) / (2**args.batch_power))
+    steps_val = max(1, int(val_events * len(pmt_positions) / (2**args.batch_power)))
+    
+    train_gen_c = get_poisson_dataset(charges, charge_hyp, pmt_positions, batch_size=2**args.batch_power, shuffle=True, split='train', val_fraction=0.1)
+    val_gen_c = get_poisson_dataset(charges, charge_hyp, pmt_positions, batch_size=2**args.batch_power, shuffle=False, split='val', val_fraction=0.1)
     
     with strategy.scope():
         chargenet = get_poisson_chargenet(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm_charge, obs_norm=obs_norm_charge)
@@ -78,17 +82,18 @@ def main():
         train_gen_c, 
         validation_data=val_gen_c, 
         epochs=args.epochs, 
+        steps_per_epoch=steps_train,
+        validation_steps=steps_val,
         callbacks=callbacks_c, 
-        verbose=2, 
-        workers=16, 
-        use_multiprocessing=True,
-        max_queue_size=512
+        verbose=2
     )
     tf.keras.models.save_model(chargenet, args.output_network + '/poisson_chargenet', save_format='tf')
+    '''
 
     # ==========================================
     # Train HitNet (PerDOM Shuffling)
     # ==========================================
+    
     print("\\n----- Training HitNet (inDOM) -----")
     hyp_norm_hit = np.stack([np.std(hit_hyp, axis=0), np.mean(hit_hyp, axis=0)])
     obs_norm_hit = np.stack([np.std(hit_obs, axis=0), np.mean(hit_obs, axis=0)])
@@ -99,6 +104,8 @@ def main():
     splits_h = max(1, int(len(hit_obs) / 10))
     train_hits, val_hits = hit_obs[:-splits_h], hit_obs[-splits_h:]
     train_hit_hyp, val_hit_hyp = hit_hyp[:-splits_h], hit_hyp[-splits_h:]
+    
+    # Create cache dir for the network (Removed as we rely on in-memory caching)
     
     # CRITICAL: shuffle='inDOM'
     train_gen_h = DataGenerator(train_hits, train_hit_hyp, batch_size=2**args.batch_power_hitnet, shuffle='inDOM', time_spread=50)

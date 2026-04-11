@@ -42,15 +42,17 @@ class DataExtractor():
         return hyp_norm, obs_norm
 
     def get_hitman_train_data(self):
-        obsdata = uproot.concatenate(
+        fields = ['mcPMTNPE', 'mcPMTID', 'mcPEFrontEndTime', 'mcke', 'scintmod_scat_len', 'scintmod_abs_len']
+        alldata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcPMTNPE', 'mcPMTID', "mcPEFrontEndTime"], library='np')
-        maps = uproot.concatenate([infile + ":meta;1" for infile in self.input_files],
+            filter_name=fields, library='np')
+            
+        maps = uproot.concatenate([self.input_files[0] + ":meta;1"],
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
 
-        n_hit = np.concatenate(obsdata['mcPMTNPE'])
-        idx = np.repeat(np.concatenate(obsdata['mcPMTID']), n_hit)
-        nhit = np.array([len(hits) for hits in obsdata['mcPEFrontEndTime']], dtype=np.int32)
+        n_hit = np.concatenate(alldata['mcPMTNPE'])
+        idx = np.repeat(np.concatenate(alldata['mcPMTID']), n_hit)
+        nhit = np.array([len(hits) for hits in alldata['mcPEFrontEndTime']], dtype=np.int32)
         charge_obs = np.stack([
             nhit.astype(np.float32),
             nhit.astype(np.float32)
@@ -60,45 +62,41 @@ class DataExtractor():
             maps['pmtX'][0][idx].astype(np.float32),
             maps['pmtY'][0][idx].astype(np.float32),
             maps['pmtZ'][0][idx].astype(np.float32),
-            np.concatenate(obsdata['mcPEFrontEndTime']).astype(np.float32),
+            np.concatenate(alldata['mcPEFrontEndTime']).astype(np.float32),
             (np.zeros(len(idx)) + 1).astype(np.float32)
         ]
             , axis=1)
 
-        del obsdata
-
-        hypdata = uproot.concatenate(
-            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
-        charge_hyp = np.stack([hypdata['mcke'].astype(np.float32),
-                               hypdata['scintmod_scat_len'].astype(np.float32),
-                               hypdata['scintmod_abs_len'].astype(np.float32)
+        charge_hyp = np.stack([alldata['mcke'].astype(np.float32),
+                               alldata['scintmod_scat_len'].astype(np.float32),
+                               alldata['scintmod_abs_len'].astype(np.float32)
                                ], axis=1)
+
+        del alldata
 
         hit_hyp = np.repeat(charge_hyp, nhit, axis=0)
         return charge_obs, hit_obs, charge_hyp, hit_hyp
 
     def get_hitman_reco_data(self):  # Loads data in old format using python dicts
-        obsdata = uproot.concatenate(
+        fields = ['mcPMTNPE', 'mcPMTID', 'mcPEFrontEndTime', 'mcke', 'scintmod_scat_len', 'scintmod_abs_len']
+        alldata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcPMTNPE', 'mcPMTID', "mcPEFrontEndTime"], library='np')
-        maps = uproot.concatenate([infile + ":meta;1" for infile in self.input_files],
+            filter_name=fields, library='np')
+            
+        maps = uproot.concatenate([self.input_files[0] + ":meta;1"],
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
 
-        hypdata = uproot.concatenate(
-            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
-        charge_hyp = np.stack([hypdata['mcke'].astype(np.float32),
-                               hypdata['scintmod_scat_len'].astype(np.float32),
-                               hypdata['scintmod_abs_len'].astype(np.float32)
+        charge_hyp = np.stack([alldata['mcke'].astype(np.float32),
+                               alldata['scintmod_scat_len'].astype(np.float32),
+                               alldata['scintmod_abs_len'].astype(np.float32)
                                ], axis=1)
 
         events = []
 
         for i in range(len(charge_hyp)):
 
-            n_hit = obsdata['mcPMTNPE'][i]
-            idx = np.repeat(obsdata['mcPMTID'][i], n_hit)
+            n_hit = alldata['mcPMTNPE'][i]
+            idx = np.repeat(alldata['mcPMTID'][i], n_hit)
 
             charge_obs = np.stack([
                 np.sum(n_hit),
@@ -109,7 +107,7 @@ class DataExtractor():
                 maps['pmtX'][0][idx].astype(np.float32),
                 maps['pmtY'][0][idx].astype(np.float32),
                 maps['pmtZ'][0][idx].astype(np.float32),
-                obsdata['mcPEFrontEndTime'][i].astype(np.float32),
+                alldata['mcPEFrontEndTime'][i].astype(np.float32),
                 (np.zeros(len(idx)) + 1).astype(np.float32)
             ]
                 , axis=1)
