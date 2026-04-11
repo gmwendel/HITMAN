@@ -21,6 +21,21 @@ class DataGenerator(tf.keras.utils.Sequence):
             self.params[:, 5] += time_shifts
 
         if shuffle == 'inDOM':
+            pmt_coords = self.data[:, 0:3]
+            unique_coords, inverse_indices = np.unique(pmt_coords, axis=0, return_inverse=True)
+            
+            self.sort_idx = np.argsort(inverse_indices)
+            sorted_params = self.params[self.sort_idx]
+            sorted_inv = inverse_indices[self.sort_idx]
+            
+            _, counts = np.unique(sorted_inv, return_counts=True)
+            self.split_idx = np.cumsum(counts)[:-1]
+            
+            self.grouped_params = np.split(sorted_params, self.split_idx)
+            
+            self.unsort_idx = np.empty_like(self.sort_idx)
+            self.unsort_idx[self.sort_idx] = np.arange(len(self.sort_idx))
+            
             self.shuffle_params_inDOM()
         else:
             self.shuffled_params = []
@@ -46,24 +61,10 @@ class DataGenerator(tf.keras.utils.Sequence):
         return hyp_norm, obs_norm
 
     def shuffle_params_inDOM(self):
-        pmt_coords = self.data[:, 0:3]
-        unique_coords, inverse_indices = np.unique(pmt_coords, axis=0, return_inverse=True)
-        
-        sort_idx = np.argsort(inverse_indices)
-        sorted_params = self.params[sort_idx]
-        sorted_inv = inverse_indices[sort_idx]
-        
-        _, counts = np.unique(sorted_inv, return_counts=True)
-        split_idx = np.cumsum(counts)[:-1]
-        
-        grouped_params = np.split(sorted_params, split_idx)
-        shuffled_grouped_params = [np.random.permutation(g) for g in grouped_params]
+        shuffled_grouped_params = [np.random.permutation(g) for g in self.grouped_params]
         shuffled_sorted_params = np.concatenate(shuffled_grouped_params)
         
-        unsort_idx = np.empty_like(sort_idx)
-        unsort_idx[sort_idx] = np.arange(len(sort_idx))
-        
-        self.shuffled_params = shuffled_sorted_params[unsort_idx]
+        self.shuffled_params = shuffled_sorted_params[self.unsort_idx]
 
     def on_epoch_end(self):
         'Updates indexes after each epoch'
