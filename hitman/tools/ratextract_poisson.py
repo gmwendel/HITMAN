@@ -25,15 +25,13 @@ class PoissonDataExtractor(DataExtractor):
         N_sensors = len(pmt_positions)
         N_events = len(charge_hyp)
         
-        # Aggregate event hits into a static array (N_events, N_sensors)
-        # where the value is the total charge observed by that specific PMT
-        charges = np.zeros((N_events, N_sensors), dtype=np.float32)
+        event_lengths = np.array([len(x) for x in obsdata['mcPMTID']], dtype=np.int32)
+        event_indices = np.repeat(np.arange(N_events), event_lengths)
+        flat_pmt_ids = np.concatenate(obsdata['mcPMTID'])
+        flat_npes = np.concatenate(obsdata['mcPMTNPE'])
         
-        for i in range(N_events):
-            pmt_ids = obsdata['mcPMTID'][i]
-            pmt_npes = obsdata['mcPMTNPE'][i]
-            # Accumulate charge for each PMT, defaults to 0
-            np.add.at(charges[i], pmt_ids, pmt_npes)
+        charges = np.zeros((N_events, N_sensors), dtype=np.float32)
+        np.add.at(charges, (event_indices, flat_pmt_ids), flat_npes)
             
         return charges, charge_hyp, pmt_positions, hit_obs, hit_hyp
 

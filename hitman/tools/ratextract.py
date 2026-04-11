@@ -53,11 +53,13 @@ class DataExtractor():
         n_hit = np.concatenate(alldata['mcPMTNPE'])
         idx = np.repeat(np.concatenate(alldata['mcPMTID']), n_hit)
         nhit = np.array([len(hits) for hits in alldata['mcPEFrontEndTime']], dtype=np.int32)
+        
+        # Total sensor charge_obs (needed for Classic ChargeNet training)
         charge_obs = np.stack([
             nhit.astype(np.float32),
             nhit.astype(np.float32)
-        ], axis=1
-        )
+        ], axis=1)
+        
         hit_obs = np.stack([
             maps['pmtX'][0][idx].astype(np.float32),
             maps['pmtY'][0][idx].astype(np.float32),
@@ -75,6 +77,8 @@ class DataExtractor():
         del alldata
 
         hit_hyp = np.repeat(charge_hyp, nhit, axis=0)
+        
+        # Also return charge_hyp for the classic ChargeNet training
         return charge_obs, hit_obs, charge_hyp, hit_hyp
 
     def get_hitman_reco_data(self):  # Loads data in old format using python dicts

@@ -1,36 +1,64 @@
-import numpy as np
 import tensorflow as tf
+import numpy as np
 
-class PoissonDataGenerator(tf.keras.utils.Sequence):
-    def __init__(self, charges, charge_hyp, pmt_positions, batch_size=2**15):
-        self.batch_size = batch_size
-        self.N_events, self.N_sensors = charges.shape
-        self.total_samples = self.N_events * self.N_sensors
+def get_poisson_dataset(charges, charge_hyp, pmt_positions, batch_size=32768, shuffle=True, split=None, val_fraction=0.1):
+    """
+    Constructs a tf.data.Dataset that yields ((pmt_positions, hypotheses), charges)
+    for Poisson ChargeNet training. Uses a fast batched Python generator mapped to 
+    vectorized Tensor operations to prevent GPU OOM crashes on array initialization.
+    """
+    N_events = charges.shape[0]
+    N_sensors = pmt_positions.shape[0]
+    
+    events_per_batch = max(1, batch_size // N_sensors)
+    
+    pmt_tensor = tf.constant(pmt_positions, dtype=tf.float32)
+    
+    start_idx = 0
+    end_idx = N_events
+    if split is not None:
+        val_size = max(1, int(N_events * val_fraction))
+        if split == 'val':
+            end_idx = val_size
+        elif split == 'train':
+            start_idx = val_size
+            
+    def batch_generator():
+        indices = np.arange(start_idx, end_idx)
+        if shuffle:
+            np.random.shuffle(indices)
         
-        # Flatten and pre-calculate pairs
-        # charges: (N_events, N_sensors) -> (N_events * N_sensors,)
-        self.flat_charges = charges.flatten()
+        # Yield pre-sliced batches of events from Python to avoid GIL overhead on millions of singles
+        for i in range(0, len(indices), events_per_batch):
+            batch_indices = indices[i:i+events_per_batch]
+            yield charges[batch_indices], charge_hyp[batch_indices]
+            
+    ds = tf.data.Dataset.from_generator(
+        batch_generator,
+        output_signature=(
+            tf.TensorSpec(shape=(None, N_sensors), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, 3), dtype=tf.float32)
+        )
+    )
+    
+    def map_batch(batch_charges, batch_hyp):
+        current_events = tf.shape(batch_charges)[0]
         
-        # charge_hyp: (N_events, 3) -> repeat each event N_sensors times -> (N_events * N_sensors, 3)
-        self.flat_hyp = np.repeat(charge_hyp, self.N_sensors, axis=0)
+        batch_pmt = tf.tile(tf.expand_dims(pmt_tensor, 0), [current_events, 1, 1])
+        batch_hyp_rep = tf.tile(tf.expand_dims(batch_hyp, 1), [1, N_sensors, 1])
         
-        # pmt_positions: (N_sensors, 3) -> tile N_events times -> (N_events * N_sensors, 3)
-        self.flat_pmt = np.tile(pmt_positions, (self.N_events, 1))
+        flat_pmt = tf.reshape(batch_pmt, [-1, 3])
+        flat_hyp = tf.reshape(batch_hyp_rep, [-1, 3])
+        flat_charges = tf.reshape(batch_charges, [-1])
         
-        self.indexes = np.arange(self.total_samples)
-        self.on_epoch_end()
+        return (flat_pmt, flat_hyp), flat_charges
 
-    def __len__(self):
-        return int(np.floor(self.total_samples / self.batch_size))
-
-    def __getitem__(self, index):
-        indexes = self.indexes[index * self.batch_size:(index + 1) * self.batch_size]
-        
-        batch_pmt = np.take(self.flat_pmt, indexes, axis=0)
-        batch_hyp = np.take(self.flat_hyp, indexes, axis=0)
-        batch_charges = np.take(self.flat_charges, indexes, axis=0)
-        
-        return (batch_pmt, batch_hyp), batch_charges
-
-    def on_epoch_end(self):
-        np.random.shuffle(self.indexes)
+    ds = ds.map(map_batch, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    ds = ds.repeat()
+    
+    options = tf.data.Options()
+    options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.DATA
+    ds = ds.with_options(options)
+    
+    return ds
