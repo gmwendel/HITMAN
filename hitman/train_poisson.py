@@ -42,7 +42,7 @@ def main():
     # ==========================================
     # Train Poisson ChargeNet
     # ==========================================
-    '''
+    
     print("----- Training Poisson ChargeNet -----")
     hyp_norm_charge = np.stack([np.std(charge_hyp, axis=0), np.mean(charge_hyp, axis=0)])
     obs_norm_charge = np.stack([np.std(pmt_positions, axis=0), np.mean(pmt_positions, axis=0)])
@@ -88,11 +88,12 @@ def main():
         verbose=2
     )
     tf.keras.models.save_model(chargenet, args.output_network + '/poisson_chargenet', save_format='tf')
-    '''
+    
 
     # ==========================================
     # Train HitNet (PerDOM Shuffling)
     # ==========================================
+    from hitman.tools.datagenerator import get_hitnet_dataset
     
     print("\\n----- Training HitNet (inDOM) -----")
     hyp_norm_hit = np.stack([np.std(hit_hyp, axis=0), np.mean(hit_hyp, axis=0)])
@@ -101,15 +102,18 @@ def main():
     hyp_norm_hit[0][hyp_norm_hit[0] == 0] = 1.0
     obs_norm_hit[0][obs_norm_hit[0] == 0] = 1.0
     
-    splits_h = max(1, int(len(hit_obs) / 10))
-    train_hits, val_hits = hit_obs[:-splits_h], hit_obs[-splits_h:]
-    train_hit_hyp, val_hit_hyp = hit_hyp[:-splits_h], hit_hyp[-splits_h:]
+    N_hits = len(hit_obs)
+    val_hits_num = max(1, int(N_hits * 0.1))
+    train_hits_num = N_hits - val_hits_num
     
-    # Create cache dir for the network (Removed as we rely on in-memory caching)
+    # Since HitNet generator doubles the batch size (True+False), steps calculation is based on half_batch
+    half_batch_hitnet = (2**args.batch_power_hitnet) // 2
+    steps_train_h = int(train_hits_num / half_batch_hitnet)
+    steps_val_h = max(1, int(val_hits_num / half_batch_hitnet))
     
     # CRITICAL: shuffle='inDOM'
-    train_gen_h = DataGenerator(train_hits, train_hit_hyp, batch_size=2**args.batch_power_hitnet, shuffle='inDOM', time_spread=50)
-    val_gen_h = DataGenerator(val_hits, val_hit_hyp, batch_size=2**args.batch_power_hitnet, shuffle='inDOM', time_spread=50)
+    train_gen_h = get_hitnet_dataset(hit_obs, hit_hyp, batch_size=2**args.batch_power_hitnet, shuffle='inDOM', time_spread=50, split='train', val_fraction=0.1)
+    val_gen_h = get_hitnet_dataset(hit_obs, hit_hyp, batch_size=2**args.batch_power_hitnet, shuffle='inDOM', time_spread=50, split='val', val_fraction=0.1)
     
     with strategy.scope():
         hitnet = get_hitnet(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm_hit, obs_norm=obs_norm_hit)
@@ -133,11 +137,10 @@ def main():
         train_gen_h, 
         validation_data=val_gen_h, 
         epochs=args.epochs, 
+        steps_per_epoch=steps_train_h,
+        validation_steps=steps_val_h,
         callbacks=callbacks_h, 
-        verbose=2, 
-        workers=16, 
-        use_multiprocessing=True,
-        max_queue_size=512
+        verbose=2
     )
     tf.keras.models.save_model(hitnet, args.output_network + '/hitnet', save_format='tf')
 
