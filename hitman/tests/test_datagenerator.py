@@ -58,26 +58,31 @@ def test_hitnet_dataset_shapes():
         assert np.sum(batch_labels.numpy()) == batch_size / 2
         break
 
-def test_hitnet_validation_split():
-    from hitman.tools.datagenerator import get_hitnet_dataset
-    
-    N_hits = 1000
-    N_params = 6
+def test_chargenet_dataset_shapes():
+    try:
+        from hitman.tools.datagenerator import get_chargenet_dataset
+    except ImportError:
+        pytest.fail("get_chargenet_dataset not implemented yet")
+
+    N_events = 1000
+    N_params = 3
     batch_size = 256
     
-    x = np.random.uniform(size=(N_hits, 5)).astype(np.float32)
-    t = np.random.uniform(size=(N_hits, N_params)).astype(np.float32)
+    # charge_obs has shape (N_events, 2)
+    charge_obs = np.random.uniform(size=(N_events, 2)).astype(np.float32)
+    # charge_hyp has shape (N_events, N_params)
+    charge_hyp = np.random.uniform(size=(N_events, N_params)).astype(np.float32)
     
-    # We want to test that the generator handles splitting cleanly
-    train_ds = get_hitnet_dataset(x, t, batch_size=batch_size, shuffle='free', split='train', val_fraction=0.1)
-    val_ds = get_hitnet_dataset(x, t, batch_size=batch_size, shuffle='free', split='val', val_fraction=0.1)
+    dataset = get_chargenet_dataset(charge_obs, charge_hyp, batch_size=batch_size)
     
-    # Check that they can generate exactly the expected number of batches before repeating
-    # val_fraction = 0.1 -> 100 val hits -> doubled for NRE (True/False) = 200 hits in val
-    # train = 900 hits -> doubled = 1800 hits in train
-    # Since batch_size=256, val should yield exactly 1 batch before exhausting, train should yield 7
+    assert isinstance(dataset, tf.data.Dataset), "Should return a tf.data.Dataset"
     
-    # In order to test without infinite repeats, we recreate without the repeat() locally or just pull N batches
-    pass # Implementation verified through runtime mechanics since we yield infinite generators via .repeat()
+    for (batch_x, batch_t), batch_labels in dataset.take(1):
+        assert batch_x.shape == (batch_size, 2)
+        assert batch_t.shape == (batch_size, N_params)
+        assert batch_labels.shape == (batch_size, 1)
+        # Check that we have a 50/50 split of 1s and 0s
+        assert np.sum(batch_labels.numpy()) == batch_size / 2
+        break
 
 
