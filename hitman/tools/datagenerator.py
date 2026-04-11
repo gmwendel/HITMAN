@@ -1,8 +1,9 @@
 import tensorflow as tf
 import numpy as np
+import os
 
 class DataGenerator(tf.keras.utils.Sequence):
-    def __init__(self, x, t, batch_size=2 ** 12, shuffle='free', time_spread=50):
+    def __init__(self, x, t, batch_size=2 ** 12, shuffle='free', time_spread=50, cache_file=None):
         assert shuffle in ['free', 'inDOM'], "Choose either 'free' or 'inDOM' shuffling."
 
         self.batch_size = int(batch_size / 2)  # half true labels half false labels
@@ -21,20 +22,34 @@ class DataGenerator(tf.keras.utils.Sequence):
             self.params[:, 5] += time_shifts
 
         if shuffle == 'inDOM':
-            pmt_coords = self.data[:, 0:3]
-            unique_coords, inverse_indices = np.unique(pmt_coords, axis=0, return_inverse=True)
-            
-            self.sort_idx = np.argsort(inverse_indices)
-            sorted_params = self.params[self.sort_idx]
-            sorted_inv = inverse_indices[self.sort_idx]
-            
-            _, counts = np.unique(sorted_inv, return_counts=True)
-            self.split_idx = np.cumsum(counts)[:-1]
-            
-            self.grouped_params = np.split(sorted_params, self.split_idx)
-            
-            self.unsort_idx = np.empty_like(self.sort_idx)
-            self.unsort_idx[self.sort_idx] = np.arange(len(self.sort_idx))
+            if cache_file and os.path.exists(cache_file):
+                print(f"Loading inDOM structures from {cache_file}...")
+                cached = np.load(cache_file)
+                self.sort_idx = cached['sort_idx']
+                self.split_idx = cached['split_idx']
+                self.unsort_idx = cached['unsort_idx']
+                
+                sorted_params = self.params[self.sort_idx]
+                self.grouped_params = np.split(sorted_params, self.split_idx)
+            else:
+                pmt_coords = self.data[:, 0:3]
+                unique_coords, inverse_indices = np.unique(pmt_coords, axis=0, return_inverse=True)
+                
+                self.sort_idx = np.argsort(inverse_indices)
+                sorted_params = self.params[self.sort_idx]
+                sorted_inv = inverse_indices[self.sort_idx]
+                
+                _, counts = np.unique(sorted_inv, return_counts=True)
+                self.split_idx = np.cumsum(counts)[:-1]
+                
+                self.grouped_params = np.split(sorted_params, self.split_idx)
+                
+                self.unsort_idx = np.empty_like(self.sort_idx)
+                self.unsort_idx[self.sort_idx] = np.arange(len(self.sort_idx))
+                
+                if cache_file:
+                    print(f"Saving inDOM structures to {cache_file}...")
+                    np.savez(cache_file, sort_idx=self.sort_idx, split_idx=self.split_idx, unsort_idx=self.unsort_idx)
             
             self.shuffle_params_inDOM()
         else:
