@@ -24,13 +24,12 @@ def tfLLH_poisson(charges, pmt_positions, theta_batch, model):
     c = tf.cast(c, tf.float32)
     c = tf.expand_dims(c, axis=-1)
     
-    # Predict lambda (expected rate)
-    lambda_pred = model([h, p])
-    epsilon = 1e-7
-    lambda_pred = tf.clip_by_value(lambda_pred, epsilon, tf.float32.max)
+    # Predict log-lambda (z)
+    z_pred = model([h, p])
+    z_pred = tf.clip_by_value(z_pred, -20.0, 20.0)
     
-    # Calculate Poisson NLL: lambda - k * ln(lambda)
-    nll = lambda_pred - c * tf.math.log(lambda_pred)
+    # Calculate Poisson NLL: e^z - k * z
+    nll = tf.math.exp(z_pred) - c * z_pred
     
     # Reshape back to (batch_size, N_sensors) and sum over sensors
     nll_reshaped = tf.reshape(nll, (batch_size, N_sensors))
@@ -115,8 +114,6 @@ def main():
         custom_objects={'poisson_chargenet_trafo': poisson_chargenet_trafo},
         compile=False
     )
-    # Softplus is already strictly positive, so we don't change the final activation to linear
-    # because we actually need the lambda prediction (not just an arbitrary NLL offset like NRE)
     
     for i, event in enumerate(events):
         llhmin, best_point = iterative_random_search(

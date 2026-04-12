@@ -19,26 +19,26 @@ def test_poisson_chargenet_architecture():
     dummy_pmt = tf.zeros((1, 3))
     dummy_params = tf.zeros((1, 3))
     
-    # Since softplus is used, the output must be strictly positive
-    out_lambda = model([dummy_pmt, dummy_params])
-    assert out_lambda.shape == (1, 1)
-    assert np.all(out_lambda.numpy() > 0), "Softplus output must be positive to represent a valid Poisson rate"
+    # Output predicts log-rate (z) so it can be positive, negative, or zero
+    out_z = model([dummy_pmt, dummy_params])
+    assert out_z.shape == (1, 1)
 
 def test_poisson_nll_loss():
-    # Test the custom loss calculation: lambda - k * ln(lambda)
+    # Test the custom loss calculation predicting log-rate (z): e^z - k * z
     
-    # If lambda = e (approx 2.718) and observed k = 1
-    # NLL = e - 1 * ln(e) = e - 1
+    # If lambda = e (approx 2.718), then z = ln(lambda) = 1.0
+    # Observed k = 1.0
+    # NLL = e^1 - 1.0 * 1.0 = e - 1.0
     
-    y_pred = tf.constant([np.e], dtype=tf.float32)
+    z_pred = tf.constant([1.0], dtype=tf.float32)
     y_true = tf.constant([1.0], dtype=tf.float32)
     
-    loss = poisson_nll_loss(y_true, y_pred)
+    loss = poisson_nll_loss(y_true, z_pred)
     assert np.isclose(loss.numpy(), np.e - 1.0, atol=1e-4)
     
-    # Test epsilon protection for log(0)
-    y_pred_zero = tf.constant([0.0], dtype=tf.float32)
+    # Test epsilon protection for log(0) - equivalent to extremely negative z
+    z_pred_extreme = tf.constant([-100.0], dtype=tf.float32)
     y_true_zero = tf.constant([1.0], dtype=tf.float32)
-    loss_zero = poisson_nll_loss(y_true_zero, y_pred_zero)
+    loss_extreme = poisson_nll_loss(y_true_zero, z_pred_extreme)
     # Should not be NaN
-    assert not np.isnan(loss_zero.numpy())
+    assert not np.isnan(loss_extreme.numpy())

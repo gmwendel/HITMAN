@@ -54,22 +54,21 @@ def get_poisson_chargenet(activation=mish, layers=3, nodes=256, hyp_norm=None, o
     for i in range(layers):
         h = tf.keras.layers.Dense(nodes, activation=activation, name='dense_' + str(i))(h)
         
-    # Output must be strictly positive since it represents the expected Poisson rate (lambda)
-    # Adding a tiny epsilon inside the loss to prevent log(0), but softplus naturally stays positive
-    outputs = tf.keras.layers.Dense(1, activation='softplus', name='dense_' + str(layers))(h)
+    # Output predicts log(lambda) to prevent gradient singularities at lambda->0
+    outputs = tf.keras.layers.Dense(1, activation='linear', name='dense_' + str(layers))(h)
 
     chargenet = tf.keras.Model(inputs=[pmt_input, params_input], outputs=outputs)
 
     return chargenet
 
-def poisson_nll_loss(y_true, y_pred):
+def poisson_nll_loss(y_true, z_pred):
     """
-    Custom Negative Log-Likelihood loss for a Poisson distribution.
+    Custom Negative Log-Likelihood loss for a Poisson distribution predicting log-rate.
     y_true: Observed charge (k)
-    y_pred: Expected charge rate (lambda)
+    z_pred: Predicted log expected charge rate (z = ln(lambda))
     
-    NLL = lambda - k * ln(lambda)
+    NLL = lambda - k * ln(lambda) = e^z - k * z
     """
-    epsilon = 1e-7 # Prevent log(0)
-    y_pred = tf.clip_by_value(y_pred, epsilon, tf.float32.max)
-    return tf.reduce_mean(y_pred - y_true * tf.math.log(y_pred))
+    # Clip z to prevent inf/nan from e^z
+    z_pred = tf.clip_by_value(z_pred, -20.0, 20.0)
+    return tf.reduce_mean(tf.math.exp(z_pred) - y_true * z_pred)

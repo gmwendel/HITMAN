@@ -19,21 +19,20 @@ def tfLLH_joint_poisson(joint_charges, N_events, pmt_positions, theta_batch, mod
     # Repeat each hypothesis N_sensors times
     p = tf.repeat(theta_batch, N_sensors, axis=0)
     
-    # Predict lambda (expected rate)
-    lambda_pred = model([h, p])
-    epsilon = 1e-7
-    lambda_pred = tf.clip_by_value(lambda_pred, epsilon, tf.float32.max)
+    # Predict log-lambda (z)
+    z_pred = model([h, p])
+    z_pred = tf.clip_by_value(z_pred, -20.0, 20.0)
     
     # Reshape back to (batch_size, N_sensors)
-    lambda_pred_reshaped = tf.reshape(lambda_pred, (batch_size, N_sensors))
+    z_pred_reshaped = tf.reshape(z_pred, (batch_size, N_sensors))
     
     # Tile joint_charges for each hypothesis in the batch
     c_total = tf.tile(joint_charges, (batch_size,))
     c_total = tf.cast(c_total, tf.float32)
     c_total = tf.reshape(c_total, (batch_size, N_sensors))
     
-    # Calculate Joint Poisson NLL: N * lambda - (sum k) * ln(lambda)
-    nll = tf.cast(N_events, tf.float32) * lambda_pred_reshaped - c_total * tf.math.log(lambda_pred_reshaped)
+    # Calculate Joint Poisson NLL: N * e^z - (sum k) * z
+    nll = tf.cast(N_events, tf.float32) * tf.math.exp(z_pred_reshaped) - c_total * z_pred_reshaped
     
     # Sum over all sensors
     total_nll = tf.math.reduce_sum(nll, axis=1)
