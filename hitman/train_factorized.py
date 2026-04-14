@@ -89,7 +89,7 @@ def main():
     with strategy.scope():
         acc_net = get_acceptance_net(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, obs_norm=None)
         optimizer_a = tf.keras.optimizers.Adam(args.lr)
-        # Mean Absolute Percentage Error is often better for scales (or MSE)
+        # Mean Absolute Percentage Error ensures precise relative accuracy on tiny (0.01-0.05) acceptance fractions
         acc_net.compile(loss='mape', optimizer=optimizer_a)
         
     callbacks_a = [
