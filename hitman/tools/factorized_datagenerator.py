@@ -29,7 +29,7 @@ def get_shape_dataset(shape_targets, charge_hyp, pmt_positions, batch_size=1024,
         batch_generator,
         output_signature=(
             tf.TensorSpec(shape=(None, N_sensors), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, 3), dtype=tf.float32)
+            tf.TensorSpec(shape=(None, 2), dtype=tf.float32)
         )
     )
     
@@ -72,7 +72,7 @@ def get_acceptance_dataset(rate_targets, charge_hyp, batch_size=1024, shuffle=Tr
     ds = tf.data.Dataset.from_generator(
         batch_generator,
         output_signature=(
-            tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
             tf.TensorSpec(shape=(None,), dtype=tf.float32)
         )
     )

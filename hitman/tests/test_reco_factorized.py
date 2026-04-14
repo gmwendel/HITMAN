@@ -56,7 +56,7 @@ def test_tfLLH_joint_factorized_runs():
     # N_events=2, N_sensors=3
     charges = np.array([[10, 20, 30], [5, 15, 25]], dtype=np.float32)
     pmt_positions = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
-    hyp_batch = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    hyp_batch = np.array([[2.0, 3.0]], dtype=np.float32)
     
     # Y = yield = 100000.0 * Energy. Let's mock a yield vector for the 2 events
     yields = tf.constant([10000.0, 20000.0], dtype=tf.float32)

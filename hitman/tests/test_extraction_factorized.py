@@ -37,7 +37,9 @@ class MockDataExtractor(FactorizedDataExtractor):
         charges = np.zeros((N_events, N_sensors), dtype=np.float32)
         np.add.at(charges, (event_indices, flat_pmt_ids), flat_npes)
         
-        return self._process_charges(charges)
+        injected_yields = np.ones(N_events, dtype=np.float32)
+        
+        return self._process_charges(charges, injected_yields)
 
 def test_factorized_extractor_normalization():
     extractor = MockDataExtractor()

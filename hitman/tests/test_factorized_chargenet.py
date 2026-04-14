@@ -4,14 +4,14 @@ import pytest
 from hitman.neural_nets.factorized_chargenet import get_shape_net, get_acceptance_net, factorized_chargenet_trafo
 
 def test_factorized_networks():
-    hyp_norm = np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]], dtype=np.float32)
+    hyp_norm = np.array([[1.0, 1.0], [0.0, 0.0]], dtype=np.float32)
     obs_norm = np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]], dtype=np.float32)
     
     shape_net = get_shape_net(layers=2, nodes=128, hyp_norm=hyp_norm, obs_norm=obs_norm)
     acc_net = get_acceptance_net(layers=2, nodes=128, hyp_norm=hyp_norm, obs_norm=obs_norm)
     
-    # 2 events, 3 hypothesis params (E, scat, abs)
-    test_hyp = tf.constant([[0.5, 0.6, 8500.0], [0.2, 0.8, 5000.0]], dtype=tf.float32)
+    # 2 events, 2 hypothesis params (scat, abs)
+    test_hyp = tf.constant([[0.6, 8500.0], [0.8, 5000.0]], dtype=tf.float32)
     # 2 events, 64 sensors, 3 coordinates each
     test_obs = tf.random.uniform((2, 64, 3), dtype=tf.float32)
     

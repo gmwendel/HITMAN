@@ -41,7 +41,7 @@ def mish(x):
     return x * tf.math.tanh(tf.math.softplus(x))
 
 def get_shape_net(activation=mish, layers=2, nodes=128, hyp_norm=None, obs_norm=None):
-    hyp_input = tf.keras.Input(shape=(3,), name="shape_hyp_in")
+    hyp_input = tf.keras.Input(shape=(2,), name="shape_hyp_in")
     obs_input = tf.keras.Input(shape=(None, 3), name="shape_obs_in") # Support arbitrary N_sensors
 
     # Broadcast hyp_input (None, 3) -> (None, 1, 3) -> (None, N_sensors, 3)
@@ -61,7 +61,7 @@ def get_shape_net(activation=mish, layers=2, nodes=128, hyp_norm=None, obs_norm=
     return tf.keras.Model(inputs=[hyp_input, obs_input], outputs=outputs, name="ShapeNet")
 
 def get_acceptance_net(activation=mish, layers=2, nodes=128, hyp_norm=None, obs_norm=None):
-    hyp_input = tf.keras.Input(shape=(3,), name="acc_hyp_in")
+    hyp_input = tf.keras.Input(shape=(2,), name="acc_hyp_in")
 
     t = factorized_chargenet_trafo(hyp_norm=hyp_norm, obs_norm=None)
     h = t(None, hyp_input)
