@@ -89,8 +89,10 @@ def main():
     with strategy.scope():
         acc_net = get_acceptance_net(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, obs_norm=None)
         optimizer_a = tf.keras.optimizers.Adam(args.lr)
-        # Mean Absolute Percentage Error ensures precise relative accuracy on tiny (0.01-0.05) acceptance fractions
-        acc_net.compile(loss='mape', optimizer=optimizer_a)
+        # Photon arrivals are a Poisson process. The true target is the observed rate (K/Y).
+        # The exact Poisson negative log-likelihood for rate prediction is: y_pred - y_true * log(y_pred)
+        # TensorFlow's Poisson loss computes exactly this.
+        acc_net.compile(loss=tf.keras.losses.Poisson(), optimizer=optimizer_a)
         
     callbacks_a = [
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
