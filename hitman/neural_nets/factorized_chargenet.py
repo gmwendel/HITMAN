@@ -1,75 +1,60 @@
 import tensorflow as tf
 import numpy as np
 
-class factorized_chargenet_trafo(tf.keras.layers.Layer):
-    '''Class to transform inputs for Factorized Networks'''
-    
-    def __init__(self, hyp_norm=None, obs_norm=None, **kwargs):
-        super().__init__(**kwargs)
-        self.hyp_norm = hyp_norm
-        self.obs_norm = obs_norm
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            "hyp_norm": self.hyp_norm,
-            "obs_norm": self.obs_norm,
-        })
-        return config
-
-    def call(self, pmt_pos, params):
-        '''
-        Handles both 2D and 3D inputs (e.g., (None, 3) or (None, 64, 3))
-        '''
-        if pmt_pos is not None:
-            pmt_normed = pmt_pos
-            if self.obs_norm is not None:
-                pmt_normed = (pmt_pos - self.obs_norm[1]) / self.obs_norm[0]
-                
-        params_normed = params
-        if self.hyp_norm is not None:
-            params_normed = (params - self.hyp_norm[1]) / self.hyp_norm[0]
-            
-        if pmt_pos is not None:
-            out = tf.concat([pmt_normed, params_normed], axis=-1)
-            return out
-        else:
-            return params_normed
-
 def mish(x):
     x = tf.convert_to_tensor(x)
     return x * tf.math.tanh(tf.math.softplus(x))
 
-def get_shape_net(activation=mish, layers=2, nodes=128, hyp_norm=None, obs_norm=None):
+from hitman.neural_nets.d2h_layers import D2hSymmetrizedLayer4Param, D2hSymmetrizedLayer8Param
+
+def get_shape_net(activation=mish, layers=2, nodes=128, hyp_norm=None, obs_norm=None, use_vertex=False):
     hyp_input = tf.keras.Input(shape=(2,), name="shape_hyp_in")
-    obs_input = tf.keras.Input(shape=(None, 3), name="shape_obs_in") # Support arbitrary N_sensors
-
-    # Broadcast hyp_input (None, 3) -> (None, 1, 3) -> (None, N_sensors, 3)
-    num_sensors = tf.shape(obs_input)[1]
-    hyp_tiled = tf.tile(tf.expand_dims(hyp_input, 1), [1, num_sensors, 1])
-
-    t = factorized_chargenet_trafo(hyp_norm=hyp_norm, obs_norm=obs_norm)
-    h = t(obs_input, hyp_tiled)
+    obs_input = tf.keras.Input(shape=(None, 3), name="shape_obs_in")
+    total_hits_input = tf.keras.Input(shape=(1,), name="shape_total_hits_in")
     
+    # We define the detector constants based on the training dataset.
+    # Currently, pitch = 10.0mm (typical for LiquidO WbLS grid), and scale = 1000.0mm
+    # Note: Sensors must be offset from bounding box edges/corners.
+    pitch = 10.0
+    detector_scale = 1000.0
+
+    if use_vertex:
+        vertex_input = tf.keras.Input(shape=(4,), name="shape_vertex_in")
+        d2h_tensor = D2hSymmetrizedLayer8Param(pitch=pitch, detector_scale=detector_scale)(
+            [hyp_input, obs_input, vertex_input]
+        )
+        inputs_list = [hyp_input, obs_input, vertex_input, total_hits_input]
+    else:
+        d2h_tensor = D2hSymmetrizedLayer4Param(pitch=pitch, detector_scale=detector_scale)(
+            [hyp_input, obs_input]
+        )
+        inputs_list = [hyp_input, obs_input, total_hits_input]
+
+    # The transformation layer natively handles normalization of features to O(1)
+    # so we can directly feed it to the dense layers.
+    x = d2h_tensor
     for i in range(layers):
-        h = tf.keras.layers.Dense(nodes, activation=activation, name='shape_dense_' + str(i))(h)
+        x = tf.keras.layers.Dense(nodes, activation=activation)(x)
 
-    outputs = tf.keras.layers.Dense(1, activation='linear', name='shape_dense_out')(h)
+    outputs = tf.keras.layers.Dense(1, activation="linear")(x)
     outputs = tf.squeeze(outputs, axis=-1)
-    outputs = tf.keras.layers.Softmax()(outputs)
-
-    return tf.keras.Model(inputs=[hyp_input, obs_input], outputs=outputs, name="ShapeNet")
+    pmf = tf.keras.layers.Softmax(axis=1)(outputs)
+    
+    # Scale PMF by total hits to predict the raw Poisson rate for each PMT
+    expected_hits = pmf * total_hits_input
+    expected_hits = expected_hits + 1e-9 # Floor to prevent Log(0)
+    
+    return tf.keras.Model(inputs=inputs_list, outputs=expected_hits, name="ShapeNet")
 
 def get_acceptance_net(activation=mish, layers=2, nodes=128, hyp_norm=None, obs_norm=None):
     hyp_input = tf.keras.Input(shape=(2,), name="acc_hyp_in")
-
-    t = factorized_chargenet_trafo(hyp_norm=hyp_norm, obs_norm=None)
-    h = t(None, hyp_input)
     
+    norm_hyp = tf.keras.layers.Normalization(mean=hyp_norm[1], variance=hyp_norm[0]**2, axis=-1)(hyp_input)
+    
+    h = norm_hyp
     for i in range(layers):
-        h = tf.keras.layers.Dense(nodes, activation=activation, name='acc_dense_' + str(i))(h)
-
-    # Softplus ensures absolute detector acceptance is strictly positive
-    outputs = tf.keras.layers.Dense(1, activation=tf.math.softplus, name='acc_dense_out')(h)
-
+        h = tf.keras.layers.Dense(nodes, activation=activation)(h)
+        
+    outputs = tf.keras.layers.Dense(1, activation=tf.math.softplus, name="acc_dense_out", 
+                                    bias_initializer=tf.keras.initializers.Constant(-3.5))(h)
     return tf.keras.Model(inputs=hyp_input, outputs=outputs, name="AcceptanceNet")
