@@ -36,7 +36,8 @@ def get_shape_dataset(shape_targets, charge_hyp, pmt_positions, batch_size=1024,
     def map_batch(batch_shapes, batch_hyp):
         current_events = tf.shape(batch_shapes)[0]
         batch_pmt = tf.tile(tf.expand_dims(pmt_tensor, 0), [current_events, 1, 1])
-        return (batch_hyp, batch_pmt), batch_shapes
+        batch_shapes_64 = tf.cast(batch_shapes, tf.float64)
+        return (batch_hyp, batch_pmt), batch_shapes_64
 
     ds = ds.map(map_batch, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.prefetch(tf.data.AUTOTUNE)
