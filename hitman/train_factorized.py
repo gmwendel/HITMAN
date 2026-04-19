@@ -73,16 +73,24 @@ def main():
     print(f"Hypothesis Norm - Mean: {hyp_norm[1]}, Std: {hyp_norm[0]}")
     print(f"Observation Norm - Mean: {obs_norm[1]}, Std: {obs_norm[0]}")
     
-    acc_features = np.zeros((len(charge_hyp), 4), dtype=np.float32)
+    acc_features = np.zeros((len(charge_hyp), 5), dtype=np.float32)
     scat = charge_hyp[:, 0]
     abs_len = charge_hyp[:, 1]
-    L_D = np.sqrt((abs_len * scat) / 3.0)
-    omega = abs_len / (abs_len + scat + 1e-12)
+    
+    L_fiber_init = 1000.0
+    inv_L_eff = (1.0 / (abs_len + 1e-12)) + (1.0 / L_fiber_init)
+    L_eff = 1.0 / inv_L_eff
+    
+    L_D = np.sqrt((L_eff * scat) / 3.0)
+    
+    Sigma_scat = 1.0 / (scat + 1e-12)
+    omega = Sigma_scat / (Sigma_scat + inv_L_eff)
     
     acc_features[:, 0] = np.log(scat + 1e-12)
     acc_features[:, 1] = np.log(abs_len + 1e-12)
-    acc_features[:, 2] = np.log(L_D + 1e-12)
-    acc_features[:, 3] = omega
+    acc_features[:, 2] = np.log(L_eff + 1e-12)
+    acc_features[:, 3] = np.log(L_D + 1e-12)
+    acc_features[:, 4] = omega
     
     acc_hyp_norm = np.stack([np.std(acc_features, axis=0), np.mean(acc_features, axis=0)])
     acc_hyp_norm[0][acc_hyp_norm[0] == 0] = 1.0
