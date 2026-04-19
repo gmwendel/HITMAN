@@ -132,7 +132,7 @@ def main():
             return tf.reduce_mean(D_shape)
 
         with strategy.scope():
-            shape_net = get_shape_net(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, obs_norm=obs_norm, use_d2h=not args.no_d2h)
+            shape_net = get_shape_net(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, acc_hyp_norm=acc_hyp_norm, obs_norm=obs_norm, use_d2h=not args.no_d2h)
             optimizer_s = tf.keras.optimizers.Adam(args.lr)
             shape_net.compile(loss=multinomial_crossentropy, optimizer=optimizer_s, metrics=[multinomial_deviance])
             
@@ -177,8 +177,7 @@ def main():
         loss = eta_sim * tf.exp(z_eps) - K_sim * z_eps
         return tf.reduce_mean(loss)
 
-    def poisson_deviance(y_true, y_pred):
-        # D_coll = 2 * (Lambda_pred - K_obs + K_obs * ln(K_obs / Lambda_pred))
+    def binomial_deviance(y_true, y_pred):
         y_true_fp64 = tf.cast(y_true, tf.float64)
         y_pred_fp64 = tf.cast(y_pred, tf.float64)
         
@@ -188,16 +187,20 @@ def main():
         
         Lambda_pred = eta_sim * tf.exp(z_eps)
         
-        # We must use tf.math.xlogy to safely handle K_sim=0
-        # tf.math.xlogy(x, y) = x * ln(y), returning 0 if x=0.
-        term = tf.math.xlogy(K_sim, K_sim / (Lambda_pred + 1e-12))
-        D_coll = 2.0 * (Lambda_pred - K_sim + term)
-        return tf.reduce_mean(D_coll)
+        # D_Binomial = 2 * [ K_obs * ln(K_obs / Lambda_pred) + (N_gen - K_obs) * ln((N_gen - K_obs) / (N_gen - Lambda_pred)) ]
+        term1 = tf.math.xlogy(K_sim, K_sim / (Lambda_pred + 1e-12))
+        
+        rem_obs = eta_sim - K_sim
+        rem_pred = eta_sim - Lambda_pred
+        term2 = tf.math.xlogy(rem_obs, rem_obs / (rem_pred + 1e-12))
+        
+        D_bin = 2.0 * (term1 + term2)
+        return tf.reduce_mean(D_bin)
 
     with strategy.scope():
         acc_net = get_acceptance_net(layers=args.layers, nodes=args.nodes, hyp_norm=acc_hyp_norm, obs_norm=None)
-        optimizer_a = tf.keras.optimizers.Adam(args.lr)
-        acc_net.compile(loss=effective_poisson_nll, optimizer=optimizer_a, metrics=[poisson_deviance])
+        optimizer_a = tf.keras.optimizers.Adam(args.lr / 10.0)
+        acc_net.compile(loss=effective_poisson_nll, optimizer=optimizer_a, metrics=[binomial_deviance])
         
     callbacks_a = [
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
