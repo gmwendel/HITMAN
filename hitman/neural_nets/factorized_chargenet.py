@@ -55,15 +55,40 @@ def get_shape_net(activation=mish, layers=2, nodes=128, hyp_norm=None, obs_norm=
     
     return tf.keras.Model(inputs=inputs_list, outputs=logits_fp64, name="ShapeNet")
 
-def get_acceptance_net(activation=mish, layers=2, nodes=128, hyp_norm=None, obs_norm=None):
+def get_acceptance_net(activation="silu", layers=2, nodes=128, hyp_norm=None, obs_norm=None):
     hyp_input = tf.keras.Input(shape=(2,), name="acc_hyp_in")
     
-    norm_hyp = tf.keras.layers.Normalization(mean=hyp_norm[1], variance=hyp_norm[0]**2, axis=-1)(hyp_input)
+    scat = hyp_input[:, 0:1]
+    abs_len = hyp_input[:, 1:2]
     
-    h = norm_hyp
+    L_D = tf.sqrt((abs_len * scat) / 3.0)
+    omega = abs_len / (abs_len + scat + 1e-12)
+    
+    log_scat = tf.math.log(scat + 1e-12)
+    log_abs = tf.math.log(abs_len + 1e-12)
+    log_LD = tf.math.log(L_D + 1e-12)
+    
+    features = tf.concat([log_scat, log_abs, log_LD, omega], axis=-1)
+    
+    # We apply a static Normalization layer initialized with the global dataset statistics 
+    # calculated in the training script to preserve the 1-to-1 deterministic physical mapping
+    h = tf.keras.layers.Normalization(mean=hyp_norm[1], variance=hyp_norm[0]**2, axis=-1)(features)
+    
     for i in range(layers):
         h = tf.keras.layers.Dense(nodes, activation=activation)(h)
         
-    outputs = tf.keras.layers.Dense(1, activation=tf.math.softplus, name="acc_dense_out", 
+    outputs = tf.keras.layers.Dense(1, activation="linear", name="acc_dense_out", 
+                                    kernel_initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=1e-4),
                                     bias_initializer=tf.keras.initializers.Constant(-3.5))(h)
     return tf.keras.Model(inputs=hyp_input, outputs=outputs, name="AcceptanceNet")
+
+def get_wrapped_acceptance_net(acc_net):
+    """
+    Temporary wrapper to provide backwards compatibility with old plotting scripts.
+    It takes the log-acceptance output (z_eps) and exponentiates it to return the 
+    linear geometric acceptance fraction (mu_geom).
+    """
+    hyp_input = tf.keras.Input(shape=(2,), name="acc_hyp_in_wrapped")
+    z_eps = acc_net(hyp_input)
+    mu_geom = tf.exp(z_eps)
+    return tf.keras.Model(inputs=hyp_input, outputs=mu_geom, name="AcceptanceNet_Wrapped")
