@@ -33,8 +33,8 @@ def main():
             charge_hyp = data['charge_hyp']
             pmt_positions = data['pmt_positions']
             energy = data['energy']
-            
-            injected_yields = energy * 100000.0
+
+            injected_yields = data['scintPhotons'] # TODO: Include cherPhotons in future work once they are properly scaled with respect to light yield and detector sensitivity.
             total_hits = np.sum(shape_targets, axis=1)
             rate_targets = np.stack([total_hits, injected_yields], axis=1)
     else:

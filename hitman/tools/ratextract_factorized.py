@@ -10,18 +10,16 @@ class FactorizedDataExtractor(DataExtractor):
     def _process_charges(self, charges, injected_yields):
         """
         Takes raw charge (hits) arrays of shape (N_events, N_sensors) and converts them into:
-        1. shape_target: the normalized PMF across all sensors for each event (with Laplace smoothing).
-        2. rate_target: the total sum of hits across the entire array for each event / injected yield.
+        1. shape_target: the normalized PMF across all sensors for each event (no artificial smoothing).
+        2. rate_target: the absolute integer hits (K_sim) and the injected photons (eta_sim).
         """
-        rate_target = np.sum(charges, axis=1) / injected_yields
-        
-        # Laplace smoothing: Add a tiny pseudo-count to ALL sensors to prevent 0 * ln(0) = NaN
-        # when calculating Kullback-Leibler divergence.
-        smoothed_charges = charges + 1e-6
+        rate_target = np.stack([np.sum(charges, axis=1), injected_yields], axis=1)
         
         # Normalize to create the exact probability mass function (PMF) where sum(sensors) = 1.0
-        smoothed_rate = np.sum(smoothed_charges, axis=1, keepdims=True)
-        shape_target = smoothed_charges / smoothed_rate
+        # No Laplace smoothing applied so the network targets the true 0's
+        event_totals = np.sum(charges, axis=1, keepdims=True)
+        # Prevent division by zero for events with 0 hits (though they are filtered out elsewhere)
+        shape_target = charges / np.clip(event_totals, 1e-12, None)
         
         return shape_target, rate_target
 
@@ -36,7 +34,7 @@ class FactorizedDataExtractor(DataExtractor):
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
         hypdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
+            filter_name=['scintPhotons', 'cherPhotons', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
         
         pmt_positions = np.stack([
             maps['pmtX'][0].astype(np.float32),
@@ -44,7 +42,7 @@ class FactorizedDataExtractor(DataExtractor):
             maps['pmtZ'][0].astype(np.float32)
         ], axis=1)
         
-        injected_yields = hypdata['mcke'].astype(np.float32) * 100000.0
+        injected_yields = hypdata['scintPhotons'].astype(np.float32) # TODO: Include cherPhotons in future work once they are properly scaled with respect to light yield and detector sensitivity.
         charge_hyp = np.stack([hypdata['scintmod_scat_len'].astype(np.float32),
                                hypdata['scintmod_abs_len'].astype(np.float32)
                                ], axis=1)
@@ -73,7 +71,7 @@ class FactorizedDataExtractor(DataExtractor):
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
         hypdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['mcke', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
+            filter_name=['scintPhotons', 'cherPhotons', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
         
         pmt_positions = np.stack([
             maps['pmtX'][0].astype(np.float32),
@@ -81,7 +79,7 @@ class FactorizedDataExtractor(DataExtractor):
             maps['pmtZ'][0].astype(np.float32)
         ], axis=1)
         
-        injected_yields = hypdata['mcke'].astype(np.float32) * 100000.0
+        injected_yields = hypdata['scintPhotons'].astype(np.float32) # TODO: Include cherPhotons in future work once they are properly scaled with respect to light yield and detector sensitivity.
         charge_hyp = np.stack([hypdata['scintmod_scat_len'].astype(np.float32),
                                hypdata['scintmod_abs_len'].astype(np.float32)
                                ], axis=1)
@@ -110,12 +108,17 @@ class FactorizedDataExtractor(DataExtractor):
             filter_name=['mcPMTNPE', 'mcPMTID'], library='np')
         maps = uproot.concatenate([self.input_files[0] + ":meta;1"],
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
+        hypdata = uproot.concatenate(
+            [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
+            filter_name=['scintPhotons', 'cherPhotons'], library='np')
         
         pmt_positions = np.stack([
             maps['pmtX'][0].astype(np.float32),
             maps['pmtY'][0].astype(np.float32),
             maps['pmtZ'][0].astype(np.float32)
         ], axis=1)
+        
+        injected_yields = hypdata['scintPhotons'].astype(np.float32) # TODO: Include cherPhotons in future work once they are properly scaled with respect to light yield and detector sensitivity.
         
         N_sensors = len(pmt_positions)
         N_events = len(events_nre)
@@ -134,7 +137,8 @@ class FactorizedDataExtractor(DataExtractor):
                 "truth": events_nre[i]['truth'],
                 "pmt_positions": pmt_positions,
                 "hits": events_nre[i]['hits'],
-                "total_charge": events_nre[i]['total_charge']
+                "total_charge": events_nre[i]['total_charge'],
+                "injected_yields": injected_yields[i]
             }
             events.append(event)
             
