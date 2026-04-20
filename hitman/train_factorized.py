@@ -103,6 +103,35 @@ def main():
     steps_train = max(1, int(train_events / args.batch_size))
     steps_val = max(1, int(val_events / args.batch_size))
     
+    class DynamicBoundsCallback(tf.keras.callbacks.Callback):
+        def __init__(self, metric_name, total_dof):
+            super(DynamicBoundsCallback, self).__init__()
+            self.metric_name = metric_name
+            self.total_dof = total_dof
+
+        def on_epoch_end(self, epoch, logs=None):
+            if logs is None:
+                return
+            val_metric = logs.get(f'val_{self.metric_name}')
+            if val_metric is not None:
+                std_err = np.sqrt(2.0 / self.total_dof)
+                lower = 1.0 - 1.96 * std_err
+                upper = 1.0 + 1.96 * std_err
+                print(f"\n---> {self.metric_name} Validation: {val_metric:.4f} (95% CI: [{lower:.3f}, {upper:.3f}])")
+
+    class WarmUpCallback(tf.keras.callbacks.Callback):
+        def __init__(self, initial_lr, warmup_epochs, start_factor=0.1):
+            super(WarmUpCallback, self).__init__()
+            self.initial_lr = initial_lr
+            self.warmup_epochs = warmup_epochs
+            self.start_factor = start_factor
+        def on_epoch_begin(self, epoch, logs=None):
+            if epoch < self.warmup_epochs:
+                progress = epoch / (self.warmup_epochs - 1) if self.warmup_epochs > 1 else 1.0
+                new_lr = self.initial_lr * (self.start_factor + (1.0 - self.start_factor) * progress)
+                tf.keras.backend.set_value(self.model.optimizer.lr, new_lr)
+                print(f'\nWarmup - setting learning rate to {new_lr:.6f}.')
+
     # ==========================================
     # Train ShapeNet
     # ==========================================
@@ -112,31 +141,24 @@ def main():
         val_gen_shape = get_shape_dataset(shape_targets, charge_hyp, pmt_positions, batch_size=args.batch_size, shuffle=False, split='val', val_fraction=0.1)
         
         def multinomial_crossentropy(y_true, y_pred):
-            # We manually compute -sum(hits * log_softmax(logits)) to avoid any Keras internal target normalization
-            # when hits don't sum to 1. This evaluates the LogSumExp mathematically optimally.
             return tf.reduce_mean(-tf.reduce_sum(y_true * tf.nn.log_softmax(y_pred), axis=-1))
 
-        def multinomial_deviance(y_true, y_pred):
-            # D_shape = 2 * sum(k_i * ln(k_i / mu_i))
-            # mu_i = K_obs * p_i
+        def pearson_chi2(y_true, y_pred):
             K_obs = tf.reduce_sum(y_true, axis=-1, keepdims=True)
-            # Prevent division by zero if K_obs=0 (though our dataset filters these)
-            K_obs_safe = tf.where(K_obs == 0, tf.ones_like(K_obs), K_obs)
             p_i = tf.nn.softmax(y_pred, axis=-1)
-            mu_i = K_obs_safe * p_i
-            
-            # We must use tf.math.xlogy to safely handle k_i=0
-            # tf.math.xlogy(x, y) = x * ln(y), returning 0 if x=0.
-            term = tf.math.xlogy(y_true, y_true / (mu_i + 1e-12))
-            D_shape = 2.0 * tf.reduce_sum(term, axis=-1)
-            return tf.reduce_mean(D_shape)
+            mu_i = K_obs * p_i
+            chi2 = tf.reduce_sum(tf.math.squared_difference(y_true, mu_i) / (mu_i + 1e-12), axis=-1)
+            dof = tf.cast(tf.shape(pmt_positions)[0] - 1, tf.float32)
+            return tf.reduce_mean(chi2 / dof)
 
         with strategy.scope():
             shape_net = get_shape_net(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, acc_hyp_norm=acc_hyp_norm, obs_norm=obs_norm, use_d2h=not args.no_d2h)
             optimizer_s = tf.keras.optimizers.Adam(args.lr)
-            shape_net.compile(loss=multinomial_crossentropy, optimizer=optimizer_s, metrics=[multinomial_deviance])
-            
+            shape_net.compile(loss=multinomial_crossentropy, optimizer=optimizer_s, metrics=[pearson_chi2])
+
         callbacks_s = [
+            WarmUpCallback(args.lr, warmup_epochs=3),
+            DynamicBoundsCallback('pearson_chi2', val_events * (len(pmt_positions) - 1.0)),
             tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
             tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
         ]
@@ -183,16 +205,13 @@ def main():
         
         K_sim = y_true_fp64[:, 0:1]
         eta_sim = y_true_fp64[:, 1:2]
-        z_eps = y_pred_fp64
         
-        Lambda_pred = eta_sim * tf.exp(z_eps)
+        z_eps = tf.clip_by_value(y_pred_fp64, -1e6, -1e-6)
         
-        # D_Binomial = 2 * [ K_obs * ln(K_obs / Lambda_pred) + (N_gen - K_obs) * ln((N_gen - K_obs) / (N_gen - Lambda_pred)) ]
-        term1 = tf.math.xlogy(K_sim, K_sim / (Lambda_pred + 1e-12))
+        term1 = tf.math.xlogy(K_sim, K_sim / eta_sim) - K_sim * z_eps
         
         rem_obs = eta_sim - K_sim
-        rem_pred = eta_sim - Lambda_pred
-        term2 = tf.math.xlogy(rem_obs, rem_obs / (rem_pred + 1e-12))
+        term2 = tf.math.xlogy(rem_obs, rem_obs / eta_sim) - rem_obs * tf.math.log1p(-tf.exp(z_eps))
         
         D_bin = 2.0 * (term1 + term2)
         return tf.reduce_mean(D_bin)
@@ -203,6 +222,8 @@ def main():
         acc_net.compile(loss=effective_poisson_nll, optimizer=optimizer_a, metrics=[binomial_deviance])
         
     callbacks_a = [
+        WarmUpCallback(args.lr / 10.0, warmup_epochs=3),
+        DynamicBoundsCallback('binomial_deviance', val_events * 1.0),
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
     ]
