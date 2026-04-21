@@ -113,14 +113,21 @@ def get_acceptance_net(activation="silu", layers=2, nodes=128, hyp_norm=None, ob
     features = FiberPhysicsLayer(init_L_fiber=1000.0)(hyp_input)
     
     # 2. Extract D2h geometric symmetries to help the MLP learn boundary escape probabilities.
-    # Transverse Reflection ONLY. We CANNOT use Rotational Degeneracy because the fibers are
-    # orthogonally stacked (X-layer, Y-layer), so X and Y are NOT symmetric at a fixed Z-depth!
-    abs_v = tf.abs(vertex_input)
-    x_abs = tf.expand_dims(abs_v[:, 0], axis=-1)
-    y_abs = tf.expand_dims(abs_v[:, 1], axis=-1)
-    z_raw = tf.expand_dims(vertex_input[:, 2], axis=-1)
+    # Apply Z-folding (Symmetry 5) to map the bottom half of the detector to the top half
+    # and swap X and Y if Z < 0 to preserve the fiber orientation (since the orthogonal layers alternate).
+    z_raw = vertex_input[:, 2]
+    condition = z_raw < 0
     
-    symmetric_vertex = tf.concat([x_abs, y_abs, z_raw], axis=-1)
+    x_folded = tf.where(condition, vertex_input[:, 1], vertex_input[:, 0])
+    y_folded = tf.where(condition, vertex_input[:, 0], vertex_input[:, 1])
+    z_folded = tf.abs(z_raw)
+    
+    # Apply Transverse Reflection (Symmetries 1-4)
+    x_abs = tf.expand_dims(tf.abs(x_folded), axis=-1)
+    y_abs = tf.expand_dims(tf.abs(y_folded), axis=-1)
+    z_final = tf.expand_dims(z_folded, axis=-1)
+    
+    symmetric_vertex = tf.concat([x_abs, y_abs, z_final], axis=-1)
     
     # Concatenate the physics priors with the symmetric vertex features
     combined_features = tf.concat([features, symmetric_vertex], axis=-1)
