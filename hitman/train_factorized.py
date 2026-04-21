@@ -94,7 +94,13 @@ def main():
     acc_features[:, 2] = np.log(L_eff + 1e-12)
     acc_features[:, 3] = np.log(L_D + 1e-12)
     acc_features[:, 4] = omega
-    acc_features[:, 5:] = vertex
+    
+    # Apply Transverse Reflection (only absolute X and Y) to the vertex for AcceptanceNet.
+    # DO NOT sort X and Y because the orthogonally stacked lattice breaks rotational symmetry at fixed Z.
+    abs_v = np.abs(vertex)
+    acc_features[:, 5] = abs_v[:, 0] # |X|
+    acc_features[:, 6] = abs_v[:, 1] # |Y|
+    acc_features[:, 7] = vertex[:, 2] # Z is left unaltered
     
     acc_hyp_norm = np.stack([np.std(acc_features, axis=0), np.mean(acc_features, axis=0)])
     acc_hyp_norm[0][acc_hyp_norm[0] == 0] = 1.0

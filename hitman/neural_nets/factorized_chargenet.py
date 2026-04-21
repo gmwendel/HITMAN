@@ -112,12 +112,22 @@ def get_acceptance_net(activation="silu", layers=2, nodes=128, hyp_norm=None, ob
     # 1. Expand features through trainable physics prior
     features = FiberPhysicsLayer(init_L_fiber=1000.0)(hyp_input)
     
-    # Concatenate the physics priors with the 3D vertex
-    combined_features = tf.concat([features, vertex_input], axis=-1)
+    # 2. Extract D2h geometric symmetries to help the MLP learn boundary escape probabilities.
+    # Transverse Reflection ONLY. We CANNOT use Rotational Degeneracy because the fibers are
+    # orthogonally stacked (X-layer, Y-layer), so X and Y are NOT symmetric at a fixed Z-depth!
+    abs_v = tf.abs(vertex_input)
+    x_abs = tf.expand_dims(abs_v[:, 0], axis=-1)
+    y_abs = tf.expand_dims(abs_v[:, 1], axis=-1)
+    z_raw = tf.expand_dims(vertex_input[:, 2], axis=-1)
     
-    # 2. We apply a static Normalization layer initialized with the global dataset statistics 
+    symmetric_vertex = tf.concat([x_abs, y_abs, z_raw], axis=-1)
+    
+    # Concatenate the physics priors with the symmetric vertex features
+    combined_features = tf.concat([features, symmetric_vertex], axis=-1)
+    
+    # 3. We apply a static Normalization layer initialized with the global dataset statistics 
     # calculated in the training script to preserve the 1-to-1 deterministic physical mapping
-    # Note: Because the feature dim increased to 8, hyp_norm MUST be of shape (2, 8)
+    # Note: Because the feature dim is 8 (5 physics + 3 symmetric coords), hyp_norm MUST be of shape (2, 8)
     h = tf.keras.layers.Normalization(mean=hyp_norm[1], variance=hyp_norm[0]**2, axis=-1)(combined_features)
     
     for i in range(layers):
