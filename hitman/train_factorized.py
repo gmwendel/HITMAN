@@ -25,14 +25,15 @@ def get_args():
 def main():
     args = get_args()
     
-    cache_path = "data/high_yield_spatial_raw_cache.npz"
-    if os.path.exists(cache_path):
+    cache_path = args.input_files[0] if args.input_files[0].endswith(".npz") else "data/high_yield_spatial_raw_cache.npz"
+    if os.path.exists(cache_path) and cache_path.endswith(".npz"):
         print(f"Loading data instantly from raw cache: {cache_path}")
         with np.load(cache_path) as data:
             shape_targets = data['charges'] # Raw, un-smoothed integer hit counts
             charge_hyp = data['charge_hyp']
             pmt_positions = data['pmt_positions']
             energy = data['energy']
+            vertex = data['vertex']
 
             injected_yields = data['scintPhotons'] # TODO: Include cherPhotons in future work once they are properly scaled with respect to light yield and detector sensitivity.
             total_hits = np.sum(shape_targets, axis=1)
@@ -45,7 +46,7 @@ def main():
         expanded_files = sorted(expanded_files)
             
         Data = FactorizedDataExtractor(expanded_files)
-        shape_targets, rate_targets, charge_hyp, pmt_positions = Data.get_factorized_only_train_data()
+        shape_targets, rate_targets, charge_hyp, pmt_positions, vertex = Data.get_factorized_only_train_data()
         
     print(f"Data Loaded. Events: {len(charge_hyp)}, Sensors: {len(pmt_positions)}")
     
@@ -53,9 +54,11 @@ def main():
     print("Globally shuffling dataset...")
     np.random.seed(42) # For reproducible train/val splits
     shuffle_idx = np.random.permutation(len(charge_hyp))
+    
     shape_targets = shape_targets[shuffle_idx]
     rate_targets = rate_targets[shuffle_idx]
     charge_hyp = charge_hyp[shuffle_idx]
+    vertex = vertex[shuffle_idx]
     
     os.makedirs(args.output_network, exist_ok=True)
     # Save the exact validation indices (first 10% of the shuffled array)
@@ -73,7 +76,7 @@ def main():
     print(f"Hypothesis Norm - Mean: {hyp_norm[1]}, Std: {hyp_norm[0]}")
     print(f"Observation Norm - Mean: {obs_norm[1]}, Std: {obs_norm[0]}")
     
-    acc_features = np.zeros((len(charge_hyp), 5), dtype=np.float32)
+    acc_features = np.zeros((len(charge_hyp), 8), dtype=np.float32)
     scat = charge_hyp[:, 0]
     abs_len = charge_hyp[:, 1]
     
@@ -91,6 +94,7 @@ def main():
     acc_features[:, 2] = np.log(L_eff + 1e-12)
     acc_features[:, 3] = np.log(L_D + 1e-12)
     acc_features[:, 4] = omega
+    acc_features[:, 5:] = vertex
     
     acc_hyp_norm = np.stack([np.std(acc_features, axis=0), np.mean(acc_features, axis=0)])
     acc_hyp_norm[0][acc_hyp_norm[0] == 0] = 1.0
@@ -137,8 +141,8 @@ def main():
     # ==========================================
     if not args.acc_only:
         print("\n----- Training ShapeNet -----")
-        train_gen_shape = get_shape_dataset(shape_targets, charge_hyp, pmt_positions, batch_size=args.batch_size, shuffle=True, split='train', val_fraction=0.1)
-        val_gen_shape = get_shape_dataset(shape_targets, charge_hyp, pmt_positions, batch_size=args.batch_size, shuffle=False, split='val', val_fraction=0.1)
+        train_gen_shape = get_shape_dataset(shape_targets, charge_hyp, pmt_positions, vertex, batch_size=args.batch_size, shuffle=True, split='train', val_fraction=0.1)
+        val_gen_shape = get_shape_dataset(shape_targets, charge_hyp, pmt_positions, vertex, batch_size=args.batch_size, shuffle=False, split='val', val_fraction=0.1)
         
         def multinomial_crossentropy(y_true, y_pred):
             return tf.reduce_mean(-tf.reduce_sum(y_true * tf.nn.log_softmax(y_pred), axis=-1))
@@ -152,7 +156,7 @@ def main():
             return tf.reduce_mean(chi2 / dof)
 
         with strategy.scope():
-            shape_net = get_shape_net(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, acc_hyp_norm=acc_hyp_norm, obs_norm=obs_norm, use_d2h=not args.no_d2h)
+            shape_net = get_shape_net(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm, acc_hyp_norm=acc_hyp_norm, obs_norm=obs_norm, use_d2h=not args.no_d2h, use_vertex=True)
             optimizer_s = tf.keras.optimizers.Adam(args.lr)
             shape_net.compile(loss=multinomial_crossentropy, optimizer=optimizer_s, metrics=[pearson_chi2])
 
@@ -160,7 +164,7 @@ def main():
             WarmUpCallback(args.lr, warmup_epochs=3),
             DynamicBoundsCallback('pearson_chi2', val_events * (len(pmt_positions) - 1.0)),
             tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
-            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
+            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-6, verbose=1)
         ]
         
         history_s = shape_net.fit(
@@ -185,8 +189,8 @@ def main():
     # Train AcceptanceNet
     # ==========================================
     print("\n----- Training AcceptanceNet -----")
-    train_gen_acc = get_acceptance_dataset(rate_targets, charge_hyp, batch_size=args.batch_size, shuffle=True, split='train', val_fraction=0.1)
-    val_gen_acc = get_acceptance_dataset(rate_targets, charge_hyp, batch_size=args.batch_size, shuffle=False, split='val', val_fraction=0.1)
+    train_gen_acc = get_acceptance_dataset(rate_targets, charge_hyp, vertex, batch_size=args.batch_size, shuffle=True, split='train', val_fraction=0.1)
+    val_gen_acc = get_acceptance_dataset(rate_targets, charge_hyp, vertex, batch_size=args.batch_size, shuffle=False, split='val', val_fraction=0.1)
     
     def effective_poisson_nll(y_true, y_pred):
         y_true_fp64 = tf.cast(y_true, tf.float64)
@@ -225,7 +229,7 @@ def main():
         WarmUpCallback(args.lr / 10.0, warmup_epochs=3),
         DynamicBoundsCallback('binomial_deviance', val_events * 1.0),
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
+        tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-6, verbose=1)
     ]
     
     history_a = acc_net.fit(

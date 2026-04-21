@@ -34,7 +34,7 @@ class FactorizedDataExtractor(DataExtractor):
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
         hypdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['scintPhotons', 'cherPhotons', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
+            filter_name=['scintPhotons', 'cherPhotons', 'scintmod_scat_len', 'scintmod_abs_len', 'mcx', 'mcy', 'mcz'], library='np')
         
         pmt_positions = np.stack([
             maps['pmtX'][0].astype(np.float32),
@@ -46,6 +46,10 @@ class FactorizedDataExtractor(DataExtractor):
         charge_hyp = np.stack([hypdata['scintmod_scat_len'].astype(np.float32),
                                hypdata['scintmod_abs_len'].astype(np.float32)
                                ], axis=1)
+        
+        vertex = np.stack([hypdata['mcx'].astype(np.float32),
+                           hypdata['mcy'].astype(np.float32),
+                           hypdata['mcz'].astype(np.float32)], axis=1)
         
         N_sensors = len(pmt_positions)
         N_events = len(charge_hyp)
@@ -60,7 +64,7 @@ class FactorizedDataExtractor(DataExtractor):
         
         shape_target, rate_target = self._process_charges(charges, injected_yields)
             
-        return shape_target, rate_target, charge_hyp, pmt_positions, hit_obs, hit_hyp
+        return shape_target, rate_target, charge_hyp, pmt_positions, vertex, hit_obs, hit_hyp
 
     def get_factorized_only_train_data(self):
         # Optimized loading: exclusively load necessary arrays, entirely skipping the massive mcPEFrontEndTime
@@ -71,7 +75,7 @@ class FactorizedDataExtractor(DataExtractor):
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
         hypdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['scintPhotons', 'cherPhotons', 'scintmod_scat_len', 'scintmod_abs_len'], library='np')
+            filter_name=['scintPhotons', 'cherPhotons', 'scintmod_scat_len', 'scintmod_abs_len', 'mcx', 'mcy', 'mcz'], library='np')
         
         pmt_positions = np.stack([
             maps['pmtX'][0].astype(np.float32),
@@ -83,6 +87,10 @@ class FactorizedDataExtractor(DataExtractor):
         charge_hyp = np.stack([hypdata['scintmod_scat_len'].astype(np.float32),
                                hypdata['scintmod_abs_len'].astype(np.float32)
                                ], axis=1)
+        
+        vertex = np.stack([hypdata['mcx'].astype(np.float32),
+                           hypdata['mcy'].astype(np.float32),
+                           hypdata['mcz'].astype(np.float32)], axis=1)
 
         N_sensors = len(pmt_positions)
         N_events = len(charge_hyp)
@@ -98,7 +106,7 @@ class FactorizedDataExtractor(DataExtractor):
         
         shape_target, rate_target = self._process_charges(charges, injected_yields)
             
-        return shape_target, rate_target, charge_hyp, pmt_positions
+        return shape_target, rate_target, charge_hyp, pmt_positions, vertex
 
     def get_factorized_reco_data(self):
         events_nre = super().get_hitman_reco_data()
@@ -110,7 +118,7 @@ class FactorizedDataExtractor(DataExtractor):
                                   filter_name=["pmtX", "pmtY", "pmtZ"], library='np')
         hypdata = uproot.concatenate(
             [self.input_files[i] + ":" + self.out_keys[i] for i in range(len(self.input_files))],
-            filter_name=['scintPhotons', 'cherPhotons'], library='np')
+            filter_name=['scintPhotons', 'cherPhotons', 'mcx', 'mcy', 'mcz'], library='np')
         
         pmt_positions = np.stack([
             maps['pmtX'][0].astype(np.float32),
@@ -119,6 +127,10 @@ class FactorizedDataExtractor(DataExtractor):
         ], axis=1)
         
         injected_yields = hypdata['scintPhotons'].astype(np.float32) # TODO: Include cherPhotons in future work once they are properly scaled with respect to light yield and detector sensitivity.
+        
+        vertex = np.stack([hypdata['mcx'].astype(np.float32),
+                           hypdata['mcy'].astype(np.float32),
+                           hypdata['mcz'].astype(np.float32)], axis=1)
         
         N_sensors = len(pmt_positions)
         N_events = len(events_nre)
@@ -135,6 +147,7 @@ class FactorizedDataExtractor(DataExtractor):
             event = {
                 "charges": charges,
                 "truth": events_nre[i]['truth'],
+                "vertex": vertex[i],
                 "pmt_positions": pmt_positions,
                 "hits": events_nre[i]['hits'],
                 "total_charge": events_nre[i]['total_charge'],
