@@ -62,6 +62,8 @@ def main():
     
     with strategy.scope():
         chargenet = get_poisson_chargenet(layers=args.layers, nodes=args.nodes, hyp_norm=hyp_norm_charge, obs_norm=obs_norm_charge)
+        # Temporarily change activation to linear to train the log-rate for stability
+        chargenet.layers[-1].activation = tf.keras.activations.linear
         optimizer_c = tf.keras.optimizers.Adam(args.lr)
         chargenet.compile(loss=poisson_nll_loss, optimizer=optimizer_c)
         
@@ -87,8 +89,12 @@ def main():
         callbacks=callbacks_c, 
         verbose=2
     )
+    
+    # Restore exponential activation so the saved model outputs lambda natively
+    chargenet.layers[-1].activation = tf.math.exp
     tf.keras.models.save_model(chargenet, args.output_network + '/poisson_chargenet', save_format='tf')
     
+    return
 
     # ==========================================
     # Train HitNet (PerDOM Shuffling)
@@ -143,6 +149,10 @@ def main():
         verbose=2
     )
     tf.keras.models.save_model(hitnet, args.output_network + '/hitnet', save_format='tf')
+
+    # Automatically export weights for pure JAX inference engines
+    from hitman.tools.jax_exporter import export_to_jax
+    export_to_jax(args.output_network)
 
 if __name__ == '__main__':
     main()

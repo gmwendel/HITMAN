@@ -195,6 +195,9 @@ def train_chargenet(args, charge_obs, charge_hyp, hyp_norm, obs_norm):
     plt.savefig(args.output_network[0] + '/chargenet.png', dpi=200)
     plt.close()
 
+    # Automatically export weights for pure JAX inference engines
+    from hitman.tools.jax_exporter import export_to_jax
+    export_to_jax(args.output_network[0])
 
 def get_args():
     import argparse

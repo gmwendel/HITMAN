@@ -32,6 +32,12 @@ def main():
             shape_targets = data['charges'] # Raw, un-smoothed integer hit counts
             charge_hyp = data['charge_hyp']
             pmt_positions = data['pmt_positions']
+            if 'pmt_dirs' in data:
+                pmt_dirs = data['pmt_dirs']
+            else:
+                pmt_dirs = np.zeros_like(pmt_positions)
+                d_idx = np.argmax(np.abs(pmt_positions), axis=-1)
+                pmt_dirs[np.arange(len(pmt_positions)), d_idx] = np.sign(pmt_positions[np.arange(len(pmt_positions)), d_idx])
             energy = data['energy']
             vertex = data['vertex']
 
@@ -44,10 +50,9 @@ def main():
         for f in args.input_files:
             expanded_files.extend(glob.glob(f))
         expanded_files = sorted(expanded_files)
-            
+
         Data = FactorizedDataExtractor(expanded_files)
-        shape_targets, rate_targets, charge_hyp, pmt_positions, vertex = Data.get_factorized_only_train_data()
-        
+        shape_targets, rate_targets, charge_hyp, pmt_positions, pmt_dirs, vertex = Data.get_factorized_only_train_data()        
     print(f"Data Loaded. Events: {len(charge_hyp)}, Sensors: {len(pmt_positions)}")
     
     # Global shuffle to prevent validation set from being biased to a specific parameter region
@@ -233,11 +238,11 @@ def main():
 
     with strategy.scope():
         acc_net = get_acceptance_net(layers=args.layers, nodes=args.nodes, hyp_norm=acc_hyp_norm, obs_norm=None)
-        optimizer_a = tf.keras.optimizers.Adam(args.lr / 10.0)
-        acc_net.compile(loss=effective_poisson_nll, optimizer=optimizer_a, metrics=[binomial_deviance])
+        optimizer_a = tf.keras.optimizers.Adam(args.lr)
+        acc_net.compile(loss=effective_poisson_nll, optimizer=optimizer_a, metrics=[binomial_deviance], jit_compile=True)
         
     callbacks_a = [
-        WarmUpCallback(args.lr / 10.0, warmup_epochs=3),
+        WarmUpCallback(args.lr, warmup_epochs=3),
         DynamicBoundsCallback('binomial_deviance', val_events * 1.0),
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-6, verbose=1)
@@ -259,6 +264,10 @@ def main():
     from hitman.neural_nets.factorized_chargenet import get_wrapped_acceptance_net
     wrapped_acc_net = get_wrapped_acceptance_net(acc_net)
     tf.keras.models.save_model(wrapped_acc_net, os.path.join(args.output_network, 'AcceptanceNet'), save_format='tf')
+
+    # Automatically export weights for pure JAX inference engines
+    from hitman.tools.jax_exporter import export_to_jax
+    export_to_jax(args.output_network)
 
 if __name__ == '__main__':
     main()
