@@ -262,10 +262,20 @@ def main():
     np.save(os.path.join(args.output_network, 'acc_hyp_norm.npy'), acc_hyp_norm)
     
     from hitman.neural_nets.factorized_chargenet import get_wrapped_acceptance_net
-    wrapped_acc_net = get_wrapped_acceptance_net(acc_net)
+    wrapped_acc_net = get_wrapped_acceptance_net(acc_net, use_logsigmoid=use_logsigmoid)
     tf.keras.models.save_model(wrapped_acc_net, os.path.join(args.output_network, 'AcceptanceNet'), save_format='tf')
 
     # Automatically export weights for pure JAX inference engines
+    from hitman.tools.jax_exporter import export_to_jax
+    export_to_jax(args.output_network, use_logsigmoid=use_logsigmoid)
+
+if __name__ == '__main__':
+    main()
+t_to_jax(args.output_network)
+
+if __name__ == '__main__':
+    main()
+ engines
     from hitman.tools.jax_exporter import export_to_jax
     export_to_jax(args.output_network)
 

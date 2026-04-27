@@ -88,5 +88,10 @@ def export_to_jax(network_dir: str, out_filename: str = "jax_weights.npz"):
     if len(weights_dict) > 0:
         np.savez_compressed(out_file, **weights_dict)
         print(f"Successfully saved {len(weights_dict)} weight matrices to {out_file}")
+        
+        config_file = os.path.join(network_dir, "config.json")
+        with open(config_file, "w") as f:
+            json.dump({"use_logsigmoid": use_logsigmoid}, f)
+        print(f"Saved inference configuration to {config_file}")
     else:
         print("No weights extracted. JAX export failed.")

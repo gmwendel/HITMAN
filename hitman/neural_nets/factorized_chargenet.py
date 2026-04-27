@@ -7,7 +7,10 @@ def mish(x):
 
 from hitman.neural_nets.d2h_layers import D2hSymmetrizedLayer4Param, D2hSymmetrizedLayer8Param
 
-def get_shape_net(activation=mish, layers=2, nodes=128, hyp_norm=None, acc_hyp_norm=None, obs_norm=None, use_vertex=False, use_d2h=True):
+def gelu_approx(x):
+    return tf.nn.gelu(x, approximate=True)
+
+def get_shape_net(activation=gelu_approx, layers=2, nodes=128, hyp_norm=None, acc_hyp_norm=None, obs_norm=None, use_vertex=False, use_d2h=True):
     hyp_input = tf.keras.Input(shape=(2,), name="shape_hyp_in")
     obs_input = tf.keras.Input(shape=(None, 3), name="shape_obs_in")
     
@@ -105,7 +108,7 @@ class FiberPhysicsLayer(tf.keras.layers.Layer):
         config.update({"init_L_fiber": self.init_L_fiber})
         return config
 
-def get_acceptance_net(activation="silu", layers=2, nodes=128, hyp_norm=None, obs_norm=None):
+def get_acceptance_net(activation=gelu_approx, layers=2, nodes=128, hyp_norm=None, obs_norm=None):
     hyp_input = tf.keras.Input(shape=(2,), name="acc_hyp_in")
     vertex_input = tf.keras.Input(shape=(3,), name="acc_vertex_in")
     
@@ -145,14 +148,20 @@ def get_acceptance_net(activation="silu", layers=2, nodes=128, hyp_norm=None, ob
                                     bias_initializer=tf.keras.initializers.Constant(-3.5))(h)
     return tf.keras.Model(inputs=[hyp_input, vertex_input], outputs=outputs, name="AcceptanceNet")
 
-def get_wrapped_acceptance_net(acc_net):
+def get_wrapped_acceptance_net(acc_net, use_logsigmoid=True):
     """
     Temporary wrapper to provide backwards compatibility with old plotting scripts.
-    It takes the log-acceptance output (z_eps) and exponentiates it to return the 
-    linear geometric acceptance fraction (mu_geom).
+    It takes the raw output logit (x) and applies the correct transformation 
+    to return the linear geometric acceptance fraction (mu_geom).
     """
     hyp_input = tf.keras.Input(shape=(2,), name="acc_hyp_in_wrapped")
     vertex_input = tf.keras.Input(shape=(3,), name="acc_vertex_in_wrapped")
-    z_eps = acc_net([hyp_input, vertex_input])
+    x = acc_net([hyp_input, vertex_input])
+    
+    if use_logsigmoid:
+        z_eps = tf.math.log_sigmoid(x)
+    else:
+        z_eps = x
+        
     mu_geom = tf.exp(z_eps)
     return tf.keras.Model(inputs=[hyp_input, vertex_input], outputs=mu_geom, name="AcceptanceNet_Wrapped")
