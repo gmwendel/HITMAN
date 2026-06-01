@@ -1,11 +1,15 @@
 import tensorflow as tf
 import numpy as np
 
-def get_shape_dataset(shape_targets, charge_hyp, pmt_positions, vertex, batch_size=1024, shuffle=True, split=None, val_fraction=0.1):
+def get_shape_dataset(shape_targets, charge_hyp, pmt_positions, vertex, batch_size=1024, shuffle=True, split=None, val_fraction=0.1, u_frames=None, v_frames=None, w_frames=None):
     N_events = shape_targets.shape[0]
     N_sensors = pmt_positions.shape[0]
     
     pmt_tensor = tf.constant(pmt_positions, dtype=tf.float32)
+    if u_frames is not None:
+        u_tensor = tf.constant(u_frames, dtype=tf.float32)
+        v_tensor = tf.constant(v_frames, dtype=tf.float32)
+        w_tensor = tf.constant(w_frames, dtype=tf.float32)
     
     start_idx = 0
     end_idx = N_events
@@ -38,6 +42,11 @@ def get_shape_dataset(shape_targets, charge_hyp, pmt_positions, vertex, batch_si
         current_events = tf.shape(batch_shapes)[0]
         batch_pmt = tf.tile(tf.expand_dims(pmt_tensor, 0), [current_events, 1, 1])
         batch_shapes_64 = tf.cast(batch_shapes, tf.float64)
+        if u_frames is not None:
+            batch_u = tf.tile(tf.expand_dims(u_tensor, 0), [current_events, 1, 1])
+            batch_v = tf.tile(tf.expand_dims(v_tensor, 0), [current_events, 1, 1])
+            batch_w = tf.tile(tf.expand_dims(w_tensor, 0), [current_events, 1, 1])
+            return (batch_hyp, batch_pmt, batch_vertex, batch_u, batch_v, batch_w), batch_shapes_64
         return (batch_hyp, batch_pmt, batch_vertex), batch_shapes_64
 
     ds = ds.map(map_batch, num_parallel_calls=tf.data.AUTOTUNE)

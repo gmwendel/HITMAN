@@ -19,9 +19,10 @@ def test_poisson_chargenet_architecture():
     dummy_pmt = tf.zeros((1, 3))
     dummy_params = tf.zeros((1, 3))
     
-    # Output predicts log-rate (z) so it can be positive, negative, or zero
-    out_z = model([dummy_pmt, dummy_params])
-    assert out_z.shape == (1, 1)
+    # Output natively predicts lambda via exp, so it must be strictly positive
+    out_lambda = model([dummy_pmt, dummy_params])
+    assert out_lambda.shape == (1, 1)
+    assert np.all(out_lambda.numpy() > 0), "Exp output must be positive to represent a valid Poisson rate"
 
 def test_poisson_nll_loss():
     # Test the custom loss calculation predicting log-rate (z): e^z - k * z

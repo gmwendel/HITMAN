@@ -7,6 +7,7 @@ pure-JAX inference engines like `sbi_inference`.
 """
 
 import os
+import json
 import numpy as np
 import tensorflow as tf
 
@@ -31,9 +32,9 @@ def extract_layers(model, model_prefix, weights_dict):
                     weights_dict[f"{model_prefix}_{layer.name}_mean"] = layer.mean.numpy()
                     weights_dict[f"{model_prefix}_{layer.name}_var"] = layer.variance.numpy()
                 except Exception as e:
-                    pass
+                    print(f"Failed to extract norm weights from {layer.name}: {e}")
 
-def export_to_jax(network_dir: str, out_filename: str = "jax_weights.npz"):
+def export_to_jax(network_dir: str, out_filename: str = "jax_weights.npz", use_logsigmoid: bool = True):
     """
     Loads trained ShapeNet and AcceptanceNet from the given directory,
     extracts all weights, and saves them to a compressed .npz archive.
@@ -41,13 +42,22 @@ def export_to_jax(network_dir: str, out_filename: str = "jax_weights.npz"):
     Args:
         network_dir (str): Directory containing 'ShapeNet' and 'AcceptanceNet' SavedModels.
         out_filename (str): Name of the output .npz file to save in the same directory.
+        use_logsigmoid (bool): Whether the AcceptanceNet uses a LogSigmoid activation.
     """
     print(f"--- Exporting TF models to JAX-compatible format ---")
     
     # Standard custom objects used in HITMAN
+    from hitman.neural_nets.factorized_chargenet import FiberPhysicsLayer
+    from hitman.neural_nets.d2h_layers import CovariantSpatialLayer
+
     def mish(x): return x * tf.math.tanh(tf.math.softplus(x))
     def gelu_approx(x): return tf.nn.gelu(x, approximate=True)
-    custom_objects = {'mish': mish, 'gelu_approx': gelu_approx}
+    custom_objects = {
+        'mish': mish, 
+        'gelu_approx': gelu_approx,
+        'FiberPhysicsLayer': FiberPhysicsLayer,
+        'CovariantSpatialLayer': CovariantSpatialLayer
+    }
 
     shape_path = os.path.join(network_dir, "ShapeNet")
     acc_path = os.path.join(network_dir, "AcceptanceNet")

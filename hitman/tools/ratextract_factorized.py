@@ -14,15 +14,11 @@ class FactorizedDataExtractor(DataExtractor):
         2. rate_target: the absolute integer hits (K_sim) and the injected photons (eta_sim).
         """
         rate_target = np.stack([np.sum(charges, axis=1), injected_yields], axis=1)
-        
-        # Normalize to create the exact probability mass function (PMF) where sum(sensors) = 1.0
-        # No Laplace smoothing applied so the network targets the true 0's
-        event_totals = np.sum(charges, axis=1, keepdims=True)
-        # Prevent division by zero for events with 0 hits (though they are filtered out elsewhere)
-        shape_target = charges / np.clip(event_totals, 1e-12, None)
-        
-        return shape_target, rate_target
 
+        # Return RAW un-normalized charges for proper Poisson-weighted gradients
+        shape_target = charges
+
+        return shape_target, rate_target
     def get_factorized_train_data(self):
         # First, grab the standard hit data
         _, hit_obs, charge_hyp_old, hit_hyp = super().get_hitman_train_data()
@@ -64,7 +60,7 @@ class FactorizedDataExtractor(DataExtractor):
         
         shape_target, rate_target = self._process_charges(charges, injected_yields)
             
-        return shape_target, rate_target, charge_hyp, pmt_positions, vertex, hit_obs, hit_hyp
+        return shape_target, rate_target, charge_hyp, pmt_positions, pmt_dirs, vertex, hit_obs, hit_hyp
 
     def get_factorized_only_train_data(self):
         # Optimized loading: exclusively load necessary arrays, entirely skipping the massive mcPEFrontEndTime

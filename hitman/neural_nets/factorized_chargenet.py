@@ -21,24 +21,32 @@ def get_shape_net(activation=gelu_approx, layers=2, nodes=128, hyp_norm=None, ac
     detector_scale = 1000.0
 
     if use_d2h:
-        # 1. Expand features through trainable physics prior
-        features = FiberPhysicsLayer(init_L_fiber=1000.0)(hyp_input)
+        # Bypass analytical physics priors and use log hypothesis parameters
+        features = tf.math.log(hyp_input + 1e-12)
         
-        # 2. Normalize features
-        norm_features = tf.keras.layers.Normalization(mean=acc_hyp_norm[1][:5], variance=acc_hyp_norm[0][:5]**2, axis=-1)(features)
+        # Normalize features directly
+        norm_features = tf.keras.layers.Normalization(mean=acc_hyp_norm[1][:2], variance=acc_hyp_norm[0][:2]**2, axis=-1, name="normalization")(features)
         
         if use_vertex:
             vertex_input = tf.keras.Input(shape=(3,), name="shape_vertex_in")
             d2h_tensor = D2hSymmetrizedLayer8Param(pitch=pitch, detector_scale=detector_scale)(
-                [norm_features, obs_input, vertex_input]
+                [hyp_input, obs_input, vertex_input]
             )
+            
+            # The tensor output from D2hSymmetrizedLayer is 8 params. 
+            # We also need to feed the Physics prior.
+            num_sensors = tf.shape(obs_input)[1]
+            norm_features_tiled = tf.tile(tf.expand_dims(norm_features, 1), [1, num_sensors, 1])
+            x = tf.concat([norm_features_tiled, d2h_tensor], axis=-1)
             inputs_list = [hyp_input, obs_input, vertex_input]
         else:
             d2h_tensor = D2hSymmetrizedLayer4Param(pitch=pitch, detector_scale=detector_scale)(
-                [norm_features, obs_input]
+                [hyp_input, obs_input]
             )
+            num_sensors = tf.shape(obs_input)[1]
+            norm_features_tiled = tf.tile(tf.expand_dims(norm_features, 1), [1, num_sensors, 1])
+            x = tf.concat([norm_features_tiled, d2h_tensor], axis=-1)
             inputs_list = [hyp_input, obs_input]
-        x = d2h_tensor
     else:
         # OLD BASELINE ARCHITECTURE (Cartesian + R)
         inputs_list = [hyp_input, obs_input]
@@ -65,7 +73,7 @@ def get_shape_net(activation=gelu_approx, layers=2, nodes=128, hyp_norm=None, ac
     return tf.keras.Model(inputs=inputs_list, outputs=logits_fp64, name="ShapeNet")
 
 class FiberPhysicsLayer(tf.keras.layers.Layer):
-    def __init__(self, init_L_fiber=1000.0, **kwargs):
+    def __init__(self, init_L_fiber=336.4, **kwargs):
         super(FiberPhysicsLayer, self).__init__(**kwargs)
         self.init_L_fiber = init_L_fiber
 
@@ -112,25 +120,23 @@ def get_acceptance_net(activation=gelu_approx, layers=2, nodes=128, hyp_norm=Non
     hyp_input = tf.keras.Input(shape=(2,), name="acc_hyp_in")
     vertex_input = tf.keras.Input(shape=(3,), name="acc_vertex_in")
     
-    # 1. Expand features through trainable physics prior
-    features = FiberPhysicsLayer(init_L_fiber=1000.0)(hyp_input)
+    # Bypass analytical physics priors and use log hypothesis parameters
+    features = tf.math.log(hyp_input + 1e-12)
     
-    # 2. Extract D2h geometric symmetries to help the MLP learn boundary escape probabilities.
-    # Apply Z-folding (Symmetry 5) to map the bottom half of the detector to the top half
-    # and swap X and Y if Z < 0 to preserve the fiber orientation (since the orthogonal layers alternate).
-    z_raw = vertex_input[:, 2]
-    condition = z_raw < 0
+    # 2. Extract D2d geometric symmetries using Harmonic Polynomial Invariants.
+    # This guarantees absolutely perfect symmetry mathematically.
+    detector_scale = 150.0
+    x_n = vertex_input[:, 0] / detector_scale
+    y_n = vertex_input[:, 1] / detector_scale
+    z_n = vertex_input[:, 2] / detector_scale
     
-    x_folded = tf.where(condition, vertex_input[:, 1], vertex_input[:, 0])
-    y_folded = tf.where(condition, vertex_input[:, 0], vertex_input[:, 1])
-    z_folded = tf.abs(z_raw)
+    r2 = tf.expand_dims(x_n**2 + y_n**2, axis=-1)
+    r4 = tf.expand_dims(x_n**4 + y_n**4, axis=-1)
+    z2 = tf.expand_dims(z_n**2, axis=-1)
+    f4 = tf.expand_dims((x_n**2 - y_n**2) * z_n, axis=-1)
+    f6 = tf.expand_dims((x_n * y_n * z_n)**2, axis=-1)
     
-    # Apply Transverse Reflection (Symmetries 1-4)
-    x_abs = tf.expand_dims(tf.abs(x_folded), axis=-1)
-    y_abs = tf.expand_dims(tf.abs(y_folded), axis=-1)
-    z_final = tf.expand_dims(z_folded, axis=-1)
-    
-    symmetric_vertex = tf.concat([x_abs, y_abs, z_final], axis=-1)
+    symmetric_vertex = tf.concat([r2, r4, z2, f4, f6], axis=-1)
     
     # Concatenate the physics priors with the symmetric vertex features
     combined_features = tf.concat([features, symmetric_vertex], axis=-1)
@@ -138,7 +144,7 @@ def get_acceptance_net(activation=gelu_approx, layers=2, nodes=128, hyp_norm=Non
     # 3. We apply a static Normalization layer initialized with the global dataset statistics 
     # calculated in the training script to preserve the 1-to-1 deterministic physical mapping
     # Note: Because the feature dim is 8 (5 physics + 3 symmetric coords), hyp_norm MUST be of shape (2, 8)
-    h = tf.keras.layers.Normalization(mean=hyp_norm[1], variance=hyp_norm[0]**2, axis=-1)(combined_features)
+    h = tf.keras.layers.Normalization(mean=hyp_norm[1], variance=hyp_norm[0]**2, axis=-1, name="normalization")(combined_features)
     
     for i in range(layers):
         h = tf.keras.layers.Dense(nodes, activation=activation)(h)

@@ -44,7 +44,7 @@ def mish(x):
     x = tf.convert_to_tensor(x)
     return x * tf.math.tanh(tf.math.softplus(x))
 
-def get_poisson_chargenet(activation=mish, layers=3, nodes=256, hyp_norm=None, obs_norm=None):
+def get_poisson_chargenet(activation=mish, layers=3, nodes=256, hyp_norm=None, obs_norm=None, use_bn=False, output_bias=None):
     pmt_input = tf.keras.Input(shape=(3,))
     params_input = tf.keras.Input(shape=(3,))
 
@@ -53,9 +53,16 @@ def get_poisson_chargenet(activation=mish, layers=3, nodes=256, hyp_norm=None, o
     
     for i in range(layers):
         h = tf.keras.layers.Dense(nodes, activation=activation, name='dense_' + str(i))(h)
+        if use_bn:
+            h = tf.keras.layers.BatchNormalization()(h)
+            
+    if output_bias is not None:
+        bias_initializer = tf.keras.initializers.Constant(output_bias)
+    else:
+        bias_initializer = 'zeros'
         
-    # Output predicts log(lambda) to prevent gradient singularities at lambda->0
-    outputs = tf.keras.layers.Dense(1, activation='linear', name='dense_' + str(layers))(h)
+    # Output natively predicts lambda via exp, but we will change to linear during training
+    outputs = tf.keras.layers.Dense(1, activation=tf.math.exp, name='dense_' + str(layers), bias_initializer=bias_initializer)(h)
 
     chargenet = tf.keras.Model(inputs=[pmt_input, params_input], outputs=outputs)
 
@@ -69,6 +76,10 @@ def poisson_nll_loss(y_true, z_pred):
     
     NLL = lambda - k * ln(lambda) = e^z - k * z
     """
+    # Fix broadcasting bug: y_true is 1D (N,) and z_pred is 2D (N, 1)
+    y_true = tf.cast(y_true, tf.float32)
+    y_true = tf.reshape(y_true, tf.shape(z_pred))
+    
     # Clip z to prevent inf/nan from e^z
     z_pred = tf.clip_by_value(z_pred, -20.0, 20.0)
     return tf.reduce_mean(tf.math.exp(z_pred) - y_true * z_pred)

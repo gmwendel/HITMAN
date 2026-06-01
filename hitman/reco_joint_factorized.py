@@ -39,13 +39,15 @@ def tfLLH_joint_factorized(charges, pmt_positions, hyp_batch, yields, shape_net,
     
     mu_nn = acc_net([hyp_batch])             # Shape: (N_hyp, 1)
     
-    # FIX: Tiling now works because f_nn is safely Rank 2
-    f_nn_events = tf.tile(tf.expand_dims(f_nn, axis=1), [1, N_events, 1]) # (N_hyp, N_events, N_sensors)
-    mu_nn_events = tf.tile(mu_nn, [1, N_events])                          # (N_hyp, N_events)
-    
-    Lambda_sig = tf.expand_dims(yields, axis=0) * mu_nn_events
-    S = tf.expand_dims(Lambda_sig, axis=-1) * f_nn_events
-    
+    # mu_nn shape: (N_hyp, 1) -> expand to (N_hyp, 1)
+    # yields shape: (N_events,) -> expand to (1, N_events)
+    # Lambda_sig broadcasts to (N_hyp, N_events)
+    Lambda_sig = mu_nn * tf.expand_dims(yields, axis=0) 
+
+    # Lambda_sig shape: (N_hyp, N_events) -> expand to (N_hyp, N_events, 1)
+    # f_nn shape: (N_hyp, N_sensors) -> expand to (N_hyp, 1, N_sensors)
+    # S broadcasts automatically to (N_hyp, N_events, N_sensors)
+    S = tf.expand_dims(Lambda_sig, axis=-1) * tf.expand_dims(f_nn, axis=1)    
     b = tf.ones((N_sensors,), dtype=tf.float32) * b_val
     
     if fixed_eps is None:
@@ -56,12 +58,14 @@ def tfLLH_joint_factorized(charges, pmt_positions, hyp_batch, yields, shape_net,
     lam = tf.expand_dims(eps, axis=-1) * S + tf.reshape(b, (1, 1, N_sensors))
     
     # Standard Poisson LLH: k*log(lam) - lam - log(k!)
-    # Using Stirling's approximation for log(k!): k*log(k) - k
+    # Using EXACT factorial: ln(k!) = ln(Gamma(k+1))
     charges_broadcast = tf.expand_dims(charges, axis=0)
     llh_matrix = charges_broadcast * tf.math.log(lam) - lam
-    
-    # Only subtract Stirling term where charges > 0
-    stirling_term = charges_broadcast * tf.math.log(charges_broadcast + 1e-12) - charges_broadcast
-    llh_matrix = llh_matrix - stirling_term
-    
+
+    exact_log_factorial = tf.math.lgamma(charges_broadcast + 1.0)
+
+    # Only apply where charges > 0
+    mask = tf.cast(charges_broadcast > 0, tf.float32)
+    llh_matrix = llh_matrix - (exact_log_factorial * mask)
+
     return -tf.reduce_sum(llh_matrix, axis=[1, 2])

@@ -22,7 +22,9 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input_files', help='Input locations', nargs='+', required=True)
     parser.add_argument('-o', '--output_network', help='Output location for network', required=True)
-    parser.add_argument('--epochs', default=50, type=int)
+    parser.add_argument('--epochs', default=5, type=int)
+    parser.add_argument('--pretrained_network', required=True)
+    parser.add_argument('--chi2_cut', default=5255.0, type=float)
     parser.add_argument('--layers', default=2, type=int)
     parser.add_argument('--nodes', default=128, type=int)
     parser.add_argument('--batch_size', default=4096, type=int)
@@ -79,12 +81,72 @@ def main():
             print(f"Loaded {len(shape_targets)} total events from cache. Applying cuts...")
             valid_energy = np.abs(scint_edep - 0.3736) < 0.05
             valid_vtx = np.all(np.abs(vertex) <= args.fiducial_cut, axis=-1)
-            valid_mask = valid_energy & valid_vtx
             
-            shape_targets = shape_targets[valid_mask]
-            charge_hyp = charge_hyp[valid_mask]
-            vertex = vertex[valid_mask]
-            rate_targets = rate_targets[valid_mask]
+            max_hits = np.max(shape_targets, axis=1)
+            hit_frac = max_hits / (total_hits + 1e-12)
+            valid_topo = (total_hits > 0) & (hit_frac <= 0.50)
+            
+            valid_mask = valid_energy & valid_vtx & valid_topo
+            
+            print(f"Loading pretrained ShapeNet from {args.pretrained_network} to calculate Chi2...")
+            pretrained_shape_model = tf.keras.models.load_model(os.path.join(args.pretrained_network, 'ShapeNet'), compile=False)
+            
+            chunk_size = 5000
+            chi2_mask = np.ones(len(shape_targets), dtype=bool)
+            
+            u_frames = None
+            if len(pretrained_shape_model.inputs) == 6:
+                with np.load('data/covariant_frames.npz') as f:
+                    u_frames = f['u_frames']
+                    v_frames = f['v_frames']
+                    w_frames = f['w_frames']
+            
+            pmt_pos_tf = tf.constant(pmt_positions, dtype=tf.float32)
+            
+            import sys
+            for i in range(0, len(shape_targets), chunk_size):
+                if i % 100000 == 0:
+                    sys.stdout.write(f"\rEvaluating Chi2: {i}/{len(shape_targets)}")
+                    sys.stdout.flush()
+                    
+                end = min(i + chunk_size, len(shape_targets))
+                if not valid_mask[i:end].any():
+                    chi2_mask[i:end] = False
+                    continue
+                    
+                h_c = tf.constant(charge_hyp[i:end], dtype=tf.float32)
+                v_c = tf.constant(vertex[i:end], dtype=tf.float32)
+                pmt_c = tf.tile(tf.expand_dims(pmt_pos_tf, 0), [end-i, 1, 1])
+                
+                if u_frames is not None:
+                    u_c = tf.tile(tf.expand_dims(tf.constant(u_frames, dtype=tf.float32), 0), [end-i, 1, 1])
+                    v_c_f = tf.tile(tf.expand_dims(tf.constant(v_frames, dtype=tf.float32), 0), [end-i, 1, 1])
+                    w_c = tf.tile(tf.expand_dims(tf.constant(w_frames, dtype=tf.float32), 0), [end-i, 1, 1])
+                    inputs = [h_c, pmt_c, v_c, u_c, v_c_f, w_c]
+                else:
+                    inputs = [h_c, pmt_c, v_c]
+                    
+                logits = pretrained_shape_model(inputs, training=False)
+                logits_f64 = tf.cast(logits, tf.float64)
+                p_i = tf.nn.softmax(logits_f64, axis=-1)
+                
+                y_true = tf.cast(shape_targets[i:end], tf.float64)
+                K_obs = tf.reduce_sum(y_true, axis=-1, keepdims=True)
+                mu_i = K_obs * p_i
+                
+                chi2 = tf.reduce_sum(tf.square(y_true - mu_i) / (mu_i + 1e-12), axis=-1).numpy()
+                chi2_mask[i:end] = chi2 <= args.chi2_cut
+
+            print("")
+            final_mask = valid_mask & chi2_mask
+            
+            del pretrained_shape_model
+            tf.keras.backend.clear_session()
+            
+            shape_targets = shape_targets[final_mask]
+            charge_hyp = charge_hyp[final_mask]
+            vertex = vertex[final_mask]
+            rate_targets = rate_targets[final_mask]
             
             # Apply subset fraction for fast validation
             if args.subset_fraction < 1.0:
@@ -218,7 +280,7 @@ def main():
             events_processed = 0
             
             for i, (x_batch, y_true_batch) in enumerate(self.val_dataset.take(self.steps)):
-                y_pred_batch = self.model(x_batch, training=False)
+                y_pred_batch = self.model.predict(x_batch, verbose=0)
                 
                 y_true = tf.cast(y_true_batch, tf.float64)
                 y_pred = tf.cast(y_pred_batch, tf.float64)
@@ -295,15 +357,7 @@ def main():
             return tf.reduce_mean(D / dof)
 
         with strategy.scope():
-            shape_net = get_shape_net(
-                layers=s_layers, 
-                nodes=s_nodes, 
-                hyp_norm=hyp_norm, 
-                acc_hyp_norm=acc_hyp_norm, 
-                obs_norm=obs_norm, 
-                use_d2h=not args.no_d2h, 
-                use_vertex=True
-            )
+            shape_net = tf.keras.models.load_model(os.path.join(args.pretrained_network, 'ShapeNet'), compile=False)
             optimizer_s = tf.keras.optimizers.Adam(args.lr)
             shape_net.compile(loss=multinomial_crossentropy, optimizer=optimizer_s, metrics=[poisson_deviance])
 
@@ -360,12 +414,7 @@ def main():
             return tf.reduce_mean(2.0 * (term1 + term2))
 
         with strategy.scope():
-            acc_net = get_acceptance_net(
-                layers=a_layers, 
-                nodes=a_nodes, 
-                hyp_norm=acc_hyp_norm, 
-                activation=tf.nn.gelu
-            )
+            acc_net = tf.keras.models.load_model(os.path.join(args.pretrained_network, 'AcceptanceNet'), compile=False)
             optimizer_a = tf.keras.optimizers.Adam(args.lr)
             acc_net.compile(loss=effective_poisson_nll, optimizer=optimizer_a, metrics=[binomial_deviance])
 

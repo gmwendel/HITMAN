@@ -5,40 +5,29 @@ import tensorflow as tf
 import pickle
 import glob
 import os
-from hitman.tools.ratextract_poisson import PoissonDataExtractor
-from hitman.neural_nets.poisson_chargenet import poisson_chargenet_trafo
+from hitman.tools.ratextract import DataExtractor
 
 @tf.function
-def tfLLH_poisson(charges, pmt_positions, theta_batch, model):
-    N_sensors = tf.shape(pmt_positions)[0]
-    batch_size = tf.shape(theta_batch)[0]
+def tfLLH_joint(all_hits, all_charges, theta_batch, hitnet, chargenet):
+    num_params = tf.shape(theta_batch)[0]
     
-    # Tile PMT positions for every hypothesis in the batch
-    h = tf.tile(pmt_positions, (batch_size, 1))
+    # Hit LLH
+    h = tf.repeat(all_hits, num_params, axis=0)
+    p_hit = tf.tile(theta_batch, (tf.shape(all_hits)[0], 1))
+    NLLH_hit = -hitnet([h, p_hit])
+    out_hit = tf.reshape(NLLH_hit, (tf.shape(all_hits)[0], num_params))
+    total_hit_llh = tf.math.reduce_sum(out_hit, axis=0)
     
-    # Repeat each hypothesis N_sensors times
-    p = tf.repeat(theta_batch, N_sensors, axis=0)
+    # Charge LLH
+    c = tf.repeat(all_charges, num_params, axis=0)
+    p_charge = tf.tile(theta_batch, (tf.shape(all_charges)[0], 1))
+    LLH_charge = chargenet([c, p_charge])
+    out_charge = tf.reshape(LLH_charge, (tf.shape(all_charges)[0], num_params))
+    total_charge_llh_to_subtract = tf.math.reduce_sum(out_charge, axis=0)
     
-    # Tile charges for every hypothesis in the batch
-    c = tf.tile(charges, (batch_size,))
-    c = tf.cast(c, tf.float32)
-    c = tf.expand_dims(c, axis=-1)
-    
-    # Predict lambda (expected rate)
-    lambda_pred = model([h, p])
-    epsilon = 1e-7
-    lambda_pred = tf.clip_by_value(lambda_pred, epsilon, tf.float32.max)
-    
-    # Calculate Poisson NLL: lambda - k * ln(lambda)
-    nll = lambda_pred - c * tf.math.log(lambda_pred)
-    
-    # Reshape back to (batch_size, N_sensors) and sum over sensors
-    nll_reshaped = tf.reshape(nll, (batch_size, N_sensors))
-    total_nll = tf.math.reduce_sum(nll_reshaped, axis=1)
-    
-    return total_nll
+    return total_hit_llh - total_charge_llh_to_subtract
 
-def iterative_random_search(model, event, samples_per_stage, stages, zoom_factor, vram_batch_size):
+def iterative_random_search(hitnet, chargenet, all_hits, all_charges, samples_per_stage, stages, zoom_factor, vram_batch_size):
     abs_bounds = np.array([
         [0.1, 0.6],       # Energy
         [0.2, 1.0],       # Scat
@@ -49,12 +38,8 @@ def iterative_random_search(model, event, samples_per_stage, stages, zoom_factor
     best_point = None
     best_llh = np.inf
     
-    charges = event['charges']
-    pmt_positions = event['pmt_positions']
-    
-    N_sensors = len(pmt_positions)
-    # Safe batch size to prevent OOM
-    actual_batch_size = max(1, vram_batch_size // N_sensors)
+    num_hits = len(all_hits)
+    actual_batch_size = max(1, vram_batch_size // max(num_hits, 1))
     
     for stage in range(stages):
         energy = np.random.uniform(current_bounds[0, 0], current_bounds[0, 1], size=(samples_per_stage, 1))
@@ -65,7 +50,7 @@ def iterative_random_search(model, event, samples_per_stage, stages, zoom_factor
         llhs = []
         for i in range(0, samples_per_stage, actual_batch_size):
             batch_points = points[i:i+actual_batch_size]
-            batch_llhs = tfLLH_poisson(charges, pmt_positions, batch_points, model).numpy()
+            batch_llhs = tfLLH_joint(all_hits, all_charges, batch_points, hitnet, chargenet).numpy()
             llhs.append(batch_llhs)
             
         all_llhs = np.concatenate(llhs)
@@ -94,7 +79,7 @@ def get_args():
     parser.add_argument('--samples_per_stage', default=100000, type=int)
     parser.add_argument('--stages', default=5, type=int)
     parser.add_argument('--zoom_factor', default=0.1, type=float)
-    parser.add_argument('--vram_batch_size', default=1000000, type=int)
+    parser.add_argument('--vram_batch_size', default=10000000, type=int)
     return parser.parse_args()
 
 def main():
@@ -103,38 +88,46 @@ def main():
     expanded_files = []
     for f in args.input_files:
         expanded_files.extend(glob.glob(f))
-        
     expanded_files = sorted(expanded_files)
-        
-    Data = PoissonDataExtractor(expanded_files)
-    events = Data.get_poisson_reco_data()
+    
+    Data = DataExtractor(expanded_files)
+    events = Data.get_hitman_reco_data()
     print(f'Data loaded. Number of events to reconstruct: {len(events)}')
     
-    model = tf.keras.models.load_model(
-        args.network + '/poisson_chargenet', 
-        custom_objects={'poisson_chargenet_trafo': poisson_chargenet_trafo},
-        compile=False
+    hitnet = tf.keras.models.load_model(args.network + '/hitnet')
+    hitnet.layers[-1].activation = tf.keras.activations.linear
+    chargenet = tf.keras.models.load_model(args.network + '/chargenet')
+    chargenet.layers[-1].activation = tf.keras.activations.linear
+    
+    # Aggregate all hits and charges
+    all_hits = np.concatenate([e['hits'] for e in events], axis=0)
+    all_charges = np.stack([e['total_charge'] for e in events], axis=0)
+    print(f'Aggregated {len(all_hits)} hits and {len(all_charges)} charges.')
+    
+    llhmin, best_point = iterative_random_search(
+        hitnet=hitnet, 
+        chargenet=chargenet, 
+        all_hits=all_hits, 
+        all_charges=all_charges, 
+        samples_per_stage=args.samples_per_stage, 
+        stages=args.stages, 
+        zoom_factor=args.zoom_factor, 
+        vram_batch_size=args.vram_batch_size
     )
     
-    for i, event in enumerate(events):
-        llhmin, best_point = iterative_random_search(
-            model=model,
-            event=event,
-            samples_per_stage=args.samples_per_stage,
-            stages=args.stages,
-            zoom_factor=args.zoom_factor,
-            vram_batch_size=args.vram_batch_size
-        )
-        
-        event['reco'] = best_point
-        event['reco_LLH'] = llhmin
-        
-        print(f'reconstruction finished for event #{i}')
-        print(f'event results: {event["reco"]}')
-        
+    result = [{
+        'reco': best_point,
+        'reco_LLH': llhmin,
+        'N_events_stacked': len(events),
+        'truth': events[0]['truth'] # all events share same truth
+    }]
+    
+    print(f'Reconstruction finished for all {len(events)} stacked events')
+    print(f'Event results: {best_point}')
+    
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     with open(args.output_file, 'wb') as f:
-        pickle.dump(events, f)
+        pickle.dump(result, f)
 
 if __name__ == '__main__':
     main()
