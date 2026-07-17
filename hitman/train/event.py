@@ -180,6 +180,14 @@ def fit_event_model(
     best_charge = (np.inf, 0, chargenet)
     best_pair = (np.inf, 0, hitnet, chargenet)
     hit_hist, charge_hist, event_hist = [], [], []
+    # One fixed marginal pairing for all validation metrics: a fresh permutation per
+    # round adds ~0.1 of sampling noise to the composed BCE (large summed logits),
+    # which would corrupt patience/selection decisions. Fixed pairing makes every
+    # metric exactly comparable across rounds (and the final recomputation).
+    key, metric_key = jax.random.split(key)
+    kh = jax.random.fold_in(metric_key, 0)
+    kc = jax.random.fold_in(metric_key, 1)
+    ke = jax.random.fold_in(metric_key, 2)
 
     for rnd in range(max_rounds):
         t0 = time.time()
@@ -197,7 +205,6 @@ def fit_event_model(
                 chargenet, states["charge"], charge_step, event_start, charge_batch_size,
                 k2, passes=charge_passes_per_round,
             )
-        key, kh, kc, ke = jax.random.split(key, 4)
         hv = float(val_bce(hitnet, data, hit_val_rows, kh, hit_batch))
         cv = float(val_bce(chargenet, data, charge_val_rows, kc, charge_batch))
         ev = float(event_val_bce(hitnet, chargenet, data, metric_hit_start, metric_event_start, ke))
@@ -230,9 +237,8 @@ def fit_event_model(
         sel_hit, sel_charge = best_hit[2], best_charge[2]
         best_hit_round, best_charge_round = best_hit[1], best_charge[1]
 
-    key, kf = jax.random.split(key)
     final_ev = float(
-        event_val_bce(sel_hit, sel_charge, data, metric_hit_start, metric_event_start, kf)
+        event_val_bce(sel_hit, sel_charge, data, metric_hit_start, metric_event_start, ke)
     )
     return EventFitResult(
         hitnet=sel_hit, chargenet=sel_charge,
