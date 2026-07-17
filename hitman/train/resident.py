@@ -78,15 +78,31 @@ class DeviceData(NamedTuple):
         )
 
 
-def hit_batch(data: DeviceData, rows: jnp.ndarray):
-    """Row indices -> (hit obs (B,4), hyp (B,7)), all gathers on device."""
-    ids = data.pmt_id[rows]
-    obs = jnp.concatenate([data.pmt_pos[ids], data.t[rows, None]], axis=1)
-    return obs, data.hyp[data.event_id[rows]]
+def hit_batch(data: DeviceData, rows: jnp.ndarray, key=None, time_sigma: float = 50.0):
+    """Row indices -> (hit obs (B,4), hyp (B,7)), all gathers on device.
+
+    When ``key`` is given, applies the 1.x time-shuffle augmentation: each event's
+    time origin shifts by N(0, time_sigma) ns coherently in its hit times and its
+    hypothesis time. Every training hypothesis has t = 0 (the extractor convention),
+    so WITHOUT this the classifier never sees theta_t variation and its theta_t
+    dependence is unconstrained extrapolation — the joint pair keeps dt invariant
+    while marginal pairs get mismatched shifts, which is exactly the contrast that
+    teaches the dt physics. (Omitting it produced a -5 ns / 115 sigma score-identity
+    violation and reconstruction collapse; see run1 validation log.)
+    """
+    ev = data.event_id[rows]
+    t = data.t[rows]
+    hyp = data.hyp[ev]
+    if key is not None and time_sigma > 0:
+        shifts = time_sigma * jax.random.normal(key, (data.n_events,))
+        t = t + shifts[ev]
+        hyp = hyp.at[:, 5].add(shifts[ev])
+    obs = jnp.concatenate([data.pmt_pos[data.pmt_id[rows]], t[:, None]], axis=1)
+    return obs, hyp
 
 
-def charge_batch(data: DeviceData, rows: jnp.ndarray):
-    """Event indices -> (charge obs (B,2), hyp (B,7))."""
+def charge_batch(data: DeviceData, rows: jnp.ndarray, key=None):
+    """Event indices -> (charge obs (B,2), hyp (B,7)). Charge features carry no time."""
     return data.charge[rows], data.hyp[rows]
 
 
@@ -125,9 +141,11 @@ def fit_resident(
 
     @eqx.filter_jit
     def train_step(model, opt_state, data, rows, key):
+        k_aug, k_loss = jax.random.split(key)
+
         def loss_fn(model):
-            obs, hyp = make_batch(data, rows)
-            return _batch_loss(model, obs, hyp, key, balance_weight)
+            obs, hyp = make_batch(data, rows, k_aug)
+            return _batch_loss(model, obs, hyp, k_loss, balance_weight)
 
         loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
         updates, opt_state = optimizer.update(grads, opt_state)
@@ -135,10 +153,12 @@ def fit_resident(
 
     @eqx.filter_jit
     def val_loss_fn(model, data, rows, key):
-        obs, hyp = make_batch(data, rows)
-        return _batch_loss(model, obs, hyp, key, balance_weight)
+        k_aug, k_loss = jax.random.split(key)
+        obs, hyp = make_batch(data, rows, k_aug)
+        return _batch_loss(model, obs, hyp, k_loss, balance_weight)
 
     steps_per_epoch = max(n_train // batch_size, 1)
+    key, val_key = jax.random.split(key)  # fixed: val metric comparable across epochs
     best = (np.inf, 0, model)
     train_hist, val_hist = [], []
 
@@ -152,7 +172,6 @@ def fit_resident(
             key, step_key = jax.random.split(key)
             model, opt_state, loss = train_step(model, opt_state, data, rows, step_key)
             losses.append(loss)  # device scalar; no per-step sync
-        key, val_key = jax.random.split(key)
         v = float(val_loss_fn(model, data, val_rows, val_key))
         train_hist.append(float(jnp.mean(jnp.stack(losses))))
         val_hist.append(v)

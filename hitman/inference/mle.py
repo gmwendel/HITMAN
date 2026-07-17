@@ -24,6 +24,31 @@ from hitman.nn.features import wrap_direction
 PARAM_SCALE = jnp.array([1000.0, 1000.0, 1000.0, 1.0, 1.0, 25.0, 1.0])
 
 
+# Optimizer-side direction chart: (zen, az) is hostile to every optimizer — the pole
+# (zen=0) makes azimuth degenerate and the polar gradient singular, and az wraps.
+# Optimize an unconstrained R^3 direction instead (normalized on evaluation); convert
+# to angles only at readout. Chart space: (x, y, z, dx, dy, dz, t, E), 8 components.
+CHART_SCALE = jnp.array([1000.0, 1000.0, 1000.0, 1.0, 1.0, 1.0, 25.0, 1.0])
+
+
+def theta_from_chart(u: jnp.ndarray) -> jnp.ndarray:
+    """(8,) chart point -> (7,) hypothesis. Smooth away from the exact pole (clipped)."""
+    d = u[3:6] / (jnp.linalg.norm(u[3:6]) + 1e-9)
+    zen = jnp.arccos(jnp.clip(d[2], -1.0 + 1e-6, 1.0 - 1e-6))
+    az = jnp.mod(jnp.arctan2(d[1], d[0]), 2.0 * jnp.pi)
+    return jnp.stack([u[0], u[1], u[2], zen, az, u[6], u[7]])
+
+
+def chart_from_theta(theta: jnp.ndarray) -> jnp.ndarray:
+    """(7,) hypothesis -> (8,) chart point (unit direction vector)."""
+    sin_zen = jnp.sin(theta[3])
+    return jnp.stack([
+        theta[0], theta[1], theta[2],
+        sin_zen * jnp.cos(theta[4]), sin_zen * jnp.sin(theta[4]), jnp.cos(theta[3]),
+        theta[5], theta[6],
+    ])
+
+
 class MLEResult(NamedTuple):
     theta: jnp.ndarray  # (7,) best-fit hypothesis, direction wrapped to physical range
     nll: jnp.ndarray  # scalar NLL at the minimum

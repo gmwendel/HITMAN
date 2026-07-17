@@ -73,9 +73,10 @@ def test_nets_stop_independently():
         hitnet, chargenet, data,
         key=jax.random.PRNGKey(4),
         hit_batch_size=1024, charge_batch_size=128, charge_passes_per_round=1,
-        max_rounds=30, patience=2, verbose=False,
+        max_rounds=80, patience=2, verbose=False,
     )
     n_rounds = len(res.event_val)
+    assert n_rounds < 80, "loop should stop on patience, not max_rounds"
     # loop ended only after both nets were >= patience past their own best
     assert n_rounds - 1 - res.best_hit_round >= 2
     assert n_rounds - 1 - res.best_charge_round >= 2

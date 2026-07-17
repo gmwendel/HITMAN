@@ -139,9 +139,11 @@ def fit_event_model(
     def make_step(make_batch):
         @eqx.filter_jit
         def step(model, state, data, rows, key):
+            k_aug, k_loss = jax.random.split(key)
+
             def loss_fn(model):
-                obs, hyp = make_batch(data, rows)
-                return _batch_loss(model, obs, hyp, key, balance_weight)
+                obs, hyp = make_batch(data, rows, k_aug)
+                return _batch_loss(model, obs, hyp, k_loss, balance_weight)
 
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
             updates, state = opt.update(grads, state)
@@ -153,8 +155,9 @@ def fit_event_model(
 
     @eqx.filter_jit
     def val_bce(model, data, rows, key, make_batch):
-        obs, hyp = make_batch(data, rows)
-        return _batch_loss(model, obs, hyp, key, balance_weight)
+        k_aug, k_loss = jax.random.split(key)
+        obs, hyp = make_batch(data, rows, k_aug)
+        return _batch_loss(model, obs, hyp, k_loss, balance_weight)
 
     def _capped(lo, hi):
         idx = np.arange(lo, hi, dtype=np.int32)
