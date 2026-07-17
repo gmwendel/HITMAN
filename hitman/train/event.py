@@ -38,24 +38,50 @@ class EventFitResult:
     final_event_bce: float  # composed BCE of the RETURNED pair (recomputed after selection)
 
 
-def event_val_bce(hitnet, chargenet, data: DeviceData, hit_start: int, event_start: int, key):
+def event_val_bce(
+    hitnet, chargenet, data: DeviceData, hit_start: int, event_start: int, key,
+    chunk_size: int = 2**19,
+):
     """Composed event-level classifier BCE on the validation tail.
 
     Events [event_start:] are the holdout; because event_id is sorted, their hits are
     the contiguous tail [hit_start:]. Marginal pairs permute hypotheses among the
     validation events (all-sensor free shuffle at event granularity).
+
+    The hit forward pass is evaluated in fixed-size chunks: at ~100 hits/event even a
+    modest event holdout is millions of hit rows, and a single vmapped forward over
+    them (x2, joint+marginal held live in one graph) allocates tens of GB of
+    activations. Chunking bounds transient memory to ~chunk_size x width floats while
+    the per-event sums accumulate in a (n_val,) buffer.
     """
     n_val = data.n_events - event_start
-    ids = data.pmt_id[hit_start:]
-    obs = jnp.concatenate([data.pmt_pos[ids], data.t[hit_start:, None]], axis=1)
-    local = data.event_id[hit_start:] - event_start
     charge = data.charge[event_start:]
     hyp = data.hyp[event_start:]
     perm = jax.random.permutation(key, n_val)
 
+    n_hit_rows = data.n_hits - hit_start
+    pad = (-n_hit_rows) % chunk_size
+    rows = np.arange(hit_start, data.n_hits + pad, dtype=np.int32)
+    rows[n_hit_rows:] = hit_start  # padding rows point at a valid hit, weighted 0
+    weights = np.ones(len(rows), np.float32)
+    weights[n_hit_rows:] = 0.0
+    row_chunks = rows.reshape(-1, chunk_size)
+    w_chunks = weights.reshape(-1, chunk_size)
+
+    @eqx.filter_jit
+    def chunk_segsum(hitnet, data, rows, w, hyp_table):
+        ids = data.pmt_id[rows]
+        obs = jnp.concatenate([data.pmt_pos[ids], data.t[rows, None]], axis=1)
+        local = data.event_id[rows] - event_start
+        logits = jax.vmap(hitnet)(obs, hyp_table[local]) * w
+        return jax.ops.segment_sum(logits, local, num_segments=n_val)
+
     def composed(hyp_table):
-        hit_logits = jax.vmap(hitnet)(obs, hyp_table[local])
-        hit_term = jax.ops.segment_sum(hit_logits, local, num_segments=n_val)
+        hit_term = jnp.zeros(n_val, jnp.float32)
+        for rc, wc in zip(row_chunks, w_chunks):
+            hit_term = hit_term + chunk_segsum(
+                hitnet, data, jnp.asarray(rc), jnp.asarray(wc), hyp_table
+            )
         return hit_term + jax.vmap(chargenet)(charge, hyp_table)
 
     l_joint = composed(hyp)
@@ -71,6 +97,7 @@ def fit_event_model(
     key,
     val_fraction: float = 0.1,
     max_val_events: int = 2**16,
+    max_val_rows: int = 2**16,
     hit_batch_size: int = 2**17,
     charge_batch_size: int = 2**14,
     charge_passes_per_round: int = 4,
@@ -129,10 +156,14 @@ def fit_event_model(
         obs, hyp = make_batch(data, rows)
         return _batch_loss(model, obs, hyp, key, balance_weight)
 
-    composed_jit = eqx.filter_jit(event_val_bce)
+    def _capped(lo, hi):
+        idx = np.arange(lo, hi, dtype=np.int32)
+        if len(idx) > max_val_rows:
+            idx = idx[:: len(idx) // max_val_rows + 1][:max_val_rows]
+        return jnp.asarray(idx)
 
-    hit_val_rows = jnp.arange(metric_hit_start, data.n_hits, dtype=jnp.int32)
-    charge_val_rows = jnp.arange(metric_event_start, n_events, dtype=jnp.int32)
+    hit_val_rows = _capped(metric_hit_start, data.n_hits)
+    charge_val_rows = _capped(metric_event_start, n_events)
 
     def sweep(model, state, step_fn, n_rows, batch_size, key, passes=1):
         bs = min(batch_size, n_rows)
@@ -169,7 +200,7 @@ def fit_event_model(
         key, kh, kc, ke = jax.random.split(key, 4)
         hv = float(val_bce(hitnet, data, hit_val_rows, kh, hit_batch))
         cv = float(val_bce(chargenet, data, charge_val_rows, kc, charge_batch))
-        ev = float(composed_jit(hitnet, chargenet, data, metric_hit_start, metric_event_start, ke))
+        ev = float(event_val_bce(hitnet, chargenet, data, metric_hit_start, metric_event_start, ke))
         hit_hist.append(hv)
         charge_hist.append(cv)
         event_hist.append(ev)
@@ -201,7 +232,7 @@ def fit_event_model(
 
     key, kf = jax.random.split(key)
     final_ev = float(
-        composed_jit(sel_hit, sel_charge, data, metric_hit_start, metric_event_start, kf)
+        event_val_bce(sel_hit, sel_charge, data, metric_hit_start, metric_event_start, kf)
     )
     return EventFitResult(
         hitnet=sel_hit, chargenet=sel_charge,
