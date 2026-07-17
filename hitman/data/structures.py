@@ -25,12 +25,16 @@ class EventBatch(NamedTuple):
         (The 1.x constant charge column, unused by the trafo, is dropped.)
     event_id : (n_hits,) int32
         Index of the owning event for each hit.
+    pmt_id : (n_hits,) int32 or None
+        Sensor index of each hit — needed by the per-sensor EML formulation
+        (in-sensor shuffling, per-sensor counts) and geometry-lookup trafos.
     """
 
     hyp: jnp.ndarray
     charge: jnp.ndarray
     hits: jnp.ndarray
     event_id: jnp.ndarray
+    pmt_id: jnp.ndarray = None
 
     @property
     def n_events(self) -> int:
@@ -47,6 +51,7 @@ class EventBatch(NamedTuple):
             charge=jnp.asarray(self.charge, jnp.float32),
             hits=jnp.asarray(self.hits, jnp.float32),
             event_id=jnp.asarray(self.event_id, jnp.int32),
+            pmt_id=None if self.pmt_id is None else jnp.asarray(self.pmt_id, jnp.int32),
         )
 
     def select(self, event_indices: np.ndarray) -> "EventBatch":
@@ -55,8 +60,13 @@ class EventBatch(NamedTuple):
         hyp = np.asarray(self.hyp)[event_indices]
         charge = np.asarray(self.charge)[event_indices]
         event_id = np.asarray(self.event_id)
-        hits = np.asarray(self.hits)
         keep = np.isin(event_id, event_indices)
         remap = np.full(int(event_id.max()) + 1, -1, dtype=np.int32)
         remap[event_indices] = np.arange(len(event_indices), dtype=np.int32)
-        return EventBatch(hyp=hyp, charge=charge, hits=hits[keep], event_id=remap[event_id[keep]])
+        return EventBatch(
+            hyp=hyp,
+            charge=charge,
+            hits=np.asarray(self.hits)[keep],
+            event_id=remap[event_id[keep]],
+            pmt_id=None if self.pmt_id is None else np.asarray(self.pmt_id)[keep],
+        )

@@ -27,6 +27,16 @@ def test_store_matches_in_ram_extractor(store):
     np.testing.assert_array_equal(np.asarray(store.charge), batch.charge)
     np.testing.assert_array_equal(np.asarray(store.hits), batch.hits)
     np.testing.assert_array_equal(np.asarray(store.event_id), batch.event_id)
+    np.testing.assert_array_equal(np.asarray(store.pmt_id), batch.pmt_id)
+
+
+def test_pmt_id_consistent_with_hit_positions(store):
+    # position columns of each hit must equal the geometry table row for its pmt_id
+    idx = np.linspace(0, store.n_hits - 1, 1000).astype(np.int64)
+    np.testing.assert_array_equal(
+        np.asarray(store.hits[idx])[:, :3],
+        np.asarray(store.pmt_pos)[np.asarray(store.pmt_id[idx])],
+    )
 
 
 def test_store_offsets_consistent(store):

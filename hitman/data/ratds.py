@@ -115,7 +115,10 @@ def _flatten_chunk(arr, pmt_pos, has_pe_id) -> EventBatch:
     # 1.x convention post-MC-truth switch: "charge" and hit count are both nhit.
     charge = np.stack([n_hits_per_event, n_hits_per_event], axis=1).astype(np.float32)
 
-    return EventBatch(hyp=hyp, charge=charge, hits=hits, event_id=event_id)
+    return EventBatch(
+        hyp=hyp, charge=charge, hits=hits, event_id=event_id,
+        pmt_id=pe_pmt.astype(np.int32),
+    )
 
 
 class RatDSExtractor:
@@ -135,4 +138,5 @@ class RatDSExtractor:
             event_id=np.concatenate(
                 [c.event_id + off for c, off in zip(chunks, offsets)]
             ),
+            pmt_id=np.concatenate([c.pmt_id for c in chunks]),
         )

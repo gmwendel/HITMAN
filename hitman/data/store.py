@@ -29,7 +29,9 @@ _ARRAYS = {
     "charge": ((2,), np.float32),
     "hits": ((4,), np.float32),
     "event_id": ((), np.int32),
+    "pmt_id": ((), np.int32),
 }
+_PER_HIT = ("hits", "event_id", "pmt_id")
 
 
 def build_store(input_files, out_dir, step_size: str = "200 MB") -> "HitStore":
@@ -46,7 +48,7 @@ def build_store(input_files, out_dir, step_size: str = "200 MB") -> "HitStore":
             os.path.join(out_dir, f"{name}.npy"),
             mode="w+",
             dtype=dtype,
-            shape=(n_hits if name in ("hits", "event_id") else n_events, *tail),
+            shape=(n_hits if name in _PER_HIT else n_events, *tail),
         )
         for name, (tail, dtype) in _ARRAYS.items()
     }
@@ -64,6 +66,7 @@ def build_store(input_files, out_dir, step_size: str = "200 MB") -> "HitStore":
         mm["charge"][e0 : e0 + ne] = chunk.charge
         mm["hits"][h0 : h0 + nh] = chunk.hits
         mm["event_id"][h0 : h0 + nh] = chunk.event_id + e0
+        mm["pmt_id"][h0 : h0 + nh] = chunk.pmt_id
         counts = np.bincount(chunk.event_id, minlength=ne)
         offsets[e0 + 1 : e0 + ne + 1] = h0 + np.cumsum(counts)
         e0 += ne
@@ -92,6 +95,7 @@ class HitStore:
         self.charge = load("charge.npy")
         self.hits = load("hits.npy")
         self.event_id = load("event_id.npy")
+        self.pmt_id = load("pmt_id.npy")
         self.hit_offsets = load("hit_offsets.npy")
         self.pmt_pos = load("pmt_pos.npy")
 
@@ -122,4 +126,5 @@ class HitStore:
             charge=np.asarray(self.charge[event_indices]),
             hits=np.asarray(self.hits[hit_idx]),
             event_id=event_id,
+            pmt_id=np.asarray(self.pmt_id[hit_idx]),
         )
