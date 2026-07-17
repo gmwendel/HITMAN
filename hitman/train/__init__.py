@@ -1,5 +1,9 @@
 from hitman.train.losses import nre_loss
 from hitman.train.loop import fit
 from hitman.train.resident import DeviceData, charge_batch, fit_resident, hit_batch
+from hitman.train.event import EventFitResult, event_val_bce, fit_event_model
 
-__all__ = ["nre_loss", "fit", "fit_resident", "DeviceData", "hit_batch", "charge_batch"]
+__all__ = [
+    "nre_loss", "fit", "fit_resident", "DeviceData", "hit_batch", "charge_batch",
+    "fit_event_model", "event_val_bce", "EventFitResult",
+]
