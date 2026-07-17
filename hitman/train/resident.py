@@ -1,0 +1,170 @@
+"""Device-resident training: the whole dataset lives on the accelerator.
+
+The GPU profile (design report, Addendum 3) showed streaming training is input-bound:
+the device step takes ~6 ms but host gather + PCIe staging ~11 ms. In the compressed
+representation — per-hit (pmt_id, t, event_id) plus the per-event hypothesis table and
+the per-sensor geometry table — the full 1M-event dataset is ~1.2 GB, so it fits on
+the device outright. Batches are then formed *inside* the jitted step by device-side
+gathers (the geometry lookup costs nothing; tables live in cache), and the host input
+pipeline disappears.
+
+Use ``fit_resident`` when the dataset fits in device memory (``DeviceData.nbytes`` to
+check); ``hitman.train.fit`` remains the streaming path for larger-than-VRAM stores.
+"""
+
+import time
+from typing import NamedTuple
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optax
+
+from hitman.train.loop import FitResult, _batch_loss
+
+
+class DeviceData(NamedTuple):
+    """Full dataset as device arrays, hits in compressed (sensor, time) form.
+
+    Per hit: ``t`` (n_hits,) f32, ``pmt_id`` (n_hits,) i32, ``event_id`` (n_hits,) i32.
+    Per event: ``hyp`` (n_events, 7) f32, ``charge`` (n_events, 2) f32.
+    Tables: ``pmt_pos`` (n_pmts, 3) f32.
+    """
+
+    t: jnp.ndarray
+    pmt_id: jnp.ndarray
+    event_id: jnp.ndarray
+    hyp: jnp.ndarray
+    charge: jnp.ndarray
+    pmt_pos: jnp.ndarray
+
+    @property
+    def n_hits(self) -> int:
+        return self.t.shape[0]
+
+    @property
+    def n_events(self) -> int:
+        return self.hyp.shape[0]
+
+    @property
+    def nbytes(self) -> int:
+        return sum(a.nbytes for a in self)
+
+    @classmethod
+    def from_store(cls, store) -> "DeviceData":
+        """Load a HitStore onto the default device (one streaming read of the memmaps)."""
+        return cls(
+            t=jnp.asarray(np.ascontiguousarray(store.hits[:, 3]), jnp.float32),
+            pmt_id=jnp.asarray(store.pmt_id, jnp.int32),
+            event_id=jnp.asarray(store.event_id, jnp.int32),
+            hyp=jnp.asarray(store.hyp, jnp.float32),
+            charge=jnp.asarray(store.charge, jnp.float32),
+            pmt_pos=jnp.asarray(store.pmt_pos, jnp.float32),
+        )
+
+    @classmethod
+    def from_batch(cls, batch, pmt_pos) -> "DeviceData":
+        """Build from an in-RAM EventBatch (requires batch.pmt_id)."""
+        if batch.pmt_id is None:
+            raise ValueError("EventBatch has no pmt_id; re-extract with the current schema")
+        return cls(
+            t=jnp.asarray(np.asarray(batch.hits)[:, 3], jnp.float32),
+            pmt_id=jnp.asarray(batch.pmt_id, jnp.int32),
+            event_id=jnp.asarray(batch.event_id, jnp.int32),
+            hyp=jnp.asarray(batch.hyp, jnp.float32),
+            charge=jnp.asarray(batch.charge, jnp.float32),
+            pmt_pos=jnp.asarray(pmt_pos, jnp.float32),
+        )
+
+
+def hit_batch(data: DeviceData, rows: jnp.ndarray):
+    """Row indices -> (hit obs (B,4), hyp (B,7)), all gathers on device."""
+    ids = data.pmt_id[rows]
+    obs = jnp.concatenate([data.pmt_pos[ids], data.t[rows, None]], axis=1)
+    return obs, data.hyp[data.event_id[rows]]
+
+
+def charge_batch(data: DeviceData, rows: jnp.ndarray):
+    """Event indices -> (charge obs (B,2), hyp (B,7))."""
+    return data.charge[rows], data.hyp[rows]
+
+
+def fit_resident(
+    model,
+    data: DeviceData,
+    make_batch,
+    n_rows: int,
+    *,
+    key,
+    batch_size: int = 2**17,
+    learning_rate: float = 1e-3,
+    max_epochs: int = 1000,
+    patience: int = 50,
+    val_fraction: float = 0.1,
+    max_val_rows: int = 2**16,
+    balance_weight: float = 0.0,
+    verbose: bool = True,
+) -> FitResult:
+    """Train an NRE model with every batch formed on-device (no host input path).
+
+    Same semantics as ``hitman.train.fit`` (row split, early stopping, BNRE option);
+    ``make_batch`` is ``hit_batch`` (n_rows = data.n_hits) or ``charge_batch``
+    (n_rows = data.n_events), or any (data, rows) -> (obs, hyp) function.
+    """
+    n_val = max(int(n_rows * val_fraction), 1)
+    n_train = n_rows - n_val
+    batch_size = min(batch_size, n_train)
+    val_idx = np.arange(n_train, n_rows)
+    if n_val > max_val_rows:
+        val_idx = val_idx[:: n_val // max_val_rows + 1][:max_val_rows]
+    val_rows = jnp.asarray(val_idx, jnp.int32)
+
+    optimizer = optax.adam(learning_rate)
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
+
+    @eqx.filter_jit
+    def train_step(model, opt_state, data, rows, key):
+        def loss_fn(model):
+            obs, hyp = make_batch(data, rows)
+            return _batch_loss(model, obs, hyp, key, balance_weight)
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        return eqx.apply_updates(model, updates), opt_state, loss
+
+    @eqx.filter_jit
+    def val_loss_fn(model, data, rows, key):
+        obs, hyp = make_batch(data, rows)
+        return _batch_loss(model, obs, hyp, key, balance_weight)
+
+    steps_per_epoch = max(n_train // batch_size, 1)
+    best = (np.inf, 0, model)
+    train_hist, val_hist = [], []
+
+    for epoch in range(max_epochs):
+        t0 = time.time()
+        key, perm_key = jax.random.split(key)
+        perm = jax.random.permutation(perm_key, n_train)
+        losses = []
+        for step in range(steps_per_epoch):
+            rows = jax.lax.dynamic_slice_in_dim(perm, step * batch_size, batch_size)
+            key, step_key = jax.random.split(key)
+            model, opt_state, loss = train_step(model, opt_state, data, rows, step_key)
+            losses.append(loss)  # device scalar; no per-step sync
+        key, val_key = jax.random.split(key)
+        v = float(val_loss_fn(model, data, val_rows, val_key))
+        train_hist.append(float(jnp.mean(jnp.stack(losses))))
+        val_hist.append(v)
+        if v < best[0]:
+            best = (v, epoch, model)
+        if verbose:
+            print(
+                f"epoch {epoch:4d}  train {train_hist[-1]:.5f}  val {v:.5f}  "
+                f"({time.time() - t0:.1f}s)",
+                flush=True,
+            )
+        if epoch - best[1] >= patience:
+            break
+
+    return FitResult(model=best[2], train_loss=train_hist, val_loss=val_hist, best_epoch=best[1])
