@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hitman"
+version = "2.0.0.dev0"
+description = "Neural likelihood-ratio event reconstruction for optical neutrino detectors (JAX)"
+authors = [{ name = "Garrett Wendel et al.", email = "gmw5164@psu.edu" }]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = [
+    "jax>=0.4.30",
+    "equinox>=0.11",
+    "optax>=0.2",
+    "blackjax>=1.2",
+    "uproot>=5.0",
+    "awkward>=2.0",
+    "numpy>=1.24",
+    "matplotlib>=3.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["hitman*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
