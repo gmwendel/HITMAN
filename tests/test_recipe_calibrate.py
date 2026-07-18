@@ -98,3 +98,21 @@ def test_z_of_theta_and_znll():
     base = lambda th: jnp.asarray(5.0)
     corr = znll(base, ScaledNet(), grid, n_hits=10)
     np.testing.assert_allclose(float(corr(jnp.zeros(7))), 5.0 + 10 * np.log(3.0), rtol=1e-5)
+
+
+def test_sandwich_null_direction_passthrough():
+    # param 0 identified (H=5, J=20 -> pull 2), param 1 unidentified (H ~ 0)
+    rng = np.random.default_rng(1)
+    n = 20000
+    scores = np.stack([2.0 * rng.standard_normal(n), rng.standard_normal(n)], axis=1)
+    scores[:, 0] *= np.sqrt(20) / 2.0
+    H_ev = np.zeros((n, 2, 2)); H_ev[:, 0, 0] = -5.0; H_ev[:, 1, 1] = -1e-12
+    sw = estimate_sandwich(scores, H_ev)
+    np.testing.assert_allclose(sw.pull_prediction[0], np.sqrt(20) / np.sqrt(5), rtol=0.05)
+    assert np.isnan(sw.pull_prediction[1])
+    samples = rng.standard_normal((3000, 2))
+    adj = adjust_samples(samples, np.zeros(2), sw)
+    # unidentified coordinate passes through untouched; identified one is stretched
+    np.testing.assert_allclose(adj[:, 1], samples[:, 1], atol=1e-9)
+    np.testing.assert_allclose(adj[:, 0].std() / samples[:, 0].std(),
+                               sw.pull_prediction[0], rtol=0.05)

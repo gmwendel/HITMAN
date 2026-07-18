@@ -29,7 +29,8 @@ class SandwichResult(NamedTuple):
     pull_prediction: np.ndarray  # per-parameter sqrt(godambe_ii / fisher_ii)
 
 
-def estimate_sandwich(scores: np.ndarray, hessians: np.ndarray) -> SandwichResult:
+def estimate_sandwich(scores: np.ndarray, hessians: np.ndarray,
+                      rcond: float = 1e-6) -> SandwichResult:
     """Estimate H, J and the sandwich from per-event scores/Hessians at a fixed theta.
 
     Parameters
@@ -37,14 +38,26 @@ def estimate_sandwich(scores: np.ndarray, hessians: np.ndarray) -> SandwichResul
     scores : (n_events, d) — per-event gradient of the event LOG-likelihood.
     hessians : (m_events, d, d) — per-event Hessian of the event log-likelihood
         (a subsample is fine; only the mean enters).
+    rcond : eigendirections of H below ``rcond * max_eig`` are treated as
+        UNIDENTIFIED (e.g. zenith at a coordinate pole): the sandwich is formed in
+        the identified subspace only, and ``pull_prediction`` is NaN along near-null
+        axes. Without this cut a tiny-but-nonzero pole eigenvalue inflates the whole
+        adjustment matrix (observed: zen180 receipt contaminating all six parameters).
     """
     J = np.atleast_2d(np.cov(np.asarray(scores).T))
     H = -np.mean(np.asarray(hessians), axis=0)
     H = 0.5 * (H + H.T)
-    fisher = np.linalg.pinv(H)
+    w, v = np.linalg.eigh(H)
+    keep = w > rcond * np.max(w)
+    winv = np.where(keep, 1.0 / np.where(keep, w, 1.0), 0.0)
+    fisher = (v * winv) @ v.T
     godambe = fisher @ J @ fisher
-    pull = np.sqrt(np.clip(np.diag(godambe), 0, None)
-                   / np.clip(np.diag(fisher), 1e-300, None))
+    f_diag, g_diag = np.diag(fisher), np.diag(godambe)
+    identified = f_diag > rcond * np.max(f_diag)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pull = np.where(identified,
+                        np.sqrt(np.clip(g_diag, 0, None) / np.where(identified, f_diag, 1.0)),
+                        np.nan)
     return SandwichResult(H=H, J=J, fisher_cov=fisher, godambe_cov=godambe,
                           pull_prediction=pull)
 
@@ -55,10 +68,20 @@ def _msqrt(a: np.ndarray) -> np.ndarray:
 
 
 def adjustment_matrix(sw: SandwichResult) -> np.ndarray:
-    """Linear map A with A C_fisher A^T = C_godambe (symmetric square-root pairing)."""
+    """Linear map A with A C_fisher A^T = C_godambe (symmetric square-root pairing).
+
+    On the unidentified null space of H (zeroed in both covariances by
+    ``estimate_sandwich``) the map acts as the IDENTITY — those directions pass
+    through unadjusted rather than being collapsed to the mode or inflated.
+    """
     s_f = _msqrt(sw.fisher_cov)
     s_g = _msqrt(sw.godambe_cov)
-    return s_g @ np.linalg.pinv(s_f)
+    A = s_g @ np.linalg.pinv(s_f)
+    # identity on the common null space: I - (projector onto range of fisher_cov)
+    w, v = np.linalg.eigh(sw.fisher_cov)
+    null = w <= 1e-12 * np.max(np.abs(w))
+    A += (v[:, null]) @ (v[:, null]).T
+    return A
 
 
 def adjust_samples(samples: np.ndarray, mode: np.ndarray, sw: SandwichResult) -> np.ndarray:
