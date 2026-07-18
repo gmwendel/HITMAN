@@ -115,7 +115,10 @@ def train_recipe(
         t0 = time.time()
         for s in range(1, max_steps + 1):
             key, sk = jax.random.split(key)
-            model, opt_state, _ = step_fn(model, opt_state, data, next(stream), sk)
+            # start must be a device array: filter_jit treats a Python int as a
+            # STATIC argument and recompiles the step for every window start
+            start = jnp.asarray(next(stream), jnp.int32)
+            model, opt_state, _ = step_fn(model, opt_state, data, start, sk)
             if s % val_every == 0:
                 v = float(val_bce(model, data, val_rows, val_key))
                 history.append((name, s, v))
