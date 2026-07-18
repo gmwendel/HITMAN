@@ -26,18 +26,23 @@ import optax
 from hitman.train.loop import _batch_loss
 
 
-def make_exact_loss(data, make_batch, rows_all, key, chunk_size: int = 2**19,
+def make_exact_loss(make_batch, rows_all, key, chunk_size: int = 2**19,
                     n_pairings: int = 2, balance_weight: float = 0.0):
     """Deterministic full-data NRE loss over a fixed row set.
 
     rows_all is truncated to a multiple of chunk_size (the dropped tail is < one
     chunk out of ~200 — negligible and keeps shapes static). Every chunk uses
     n_pairings fixed (augmentation, marginal-permutation) key pairs, averaged.
+
+    The returned loss takes ``data`` as an explicit argument: closing over the
+    dataset would bake it into EVERY compiled executable as constants (7.8 GB
+    each at 5M events — three executables OOM'd a 32 GB card); as a traced
+    argument all executables share the single resident copy.
     """
     n_chunks = len(rows_all) // chunk_size
-    chunks = jnp.asarray(rows_all[: n_chunks * chunk_size].reshape(n_chunks, chunk_size))
+    chunks_host = rows_all[: n_chunks * chunk_size].reshape(n_chunks, chunk_size)
 
-    def chunk_loss(model, rows, ci):
+    def chunk_loss(model, data, rows, ci):
         def one_pairing(j):
             k = jax.random.fold_in(jax.random.fold_in(key, ci), j)
             k_aug, k_perm = jax.random.split(k)
@@ -48,15 +53,15 @@ def make_exact_loss(data, make_batch, rows_all, key, chunk_size: int = 2**19,
 
     chunk_loss = jax.remat(chunk_loss, static_argnums=())
 
-    def exact_loss(model):
+    def exact_loss(model, data, chunks):
         def body(acc, ci):
-            return acc + chunk_loss(model, chunks[ci], ci), None
+            return acc + chunk_loss(model, data, chunks[ci], ci), None
 
         total, _ = jax.lax.scan(body, jnp.asarray(0.0, jnp.float32),
                                 jnp.arange(n_chunks))
         return total / n_chunks
 
-    return exact_loss
+    return exact_loss, chunks_host
 
 
 def exact_polish(
@@ -83,17 +88,15 @@ def exact_polish(
         val_idx = val_idx[:: n_val // max_val_rows + 1][:max_val_rows]
 
     key, loss_key, val_key = jax.random.split(key, 3)
-    exact_loss_dyn = make_exact_loss(data, make_batch, train_rows, loss_key,
-                                     chunk_size, n_pairings, balance_weight)
+    exact_loss_fn, chunks_host = make_exact_loss(make_batch, train_rows, loss_key,
+                                                 chunk_size, n_pairings, balance_weight)
+    chunks_dev = jnp.asarray(chunks_host)
 
     # static/dynamic split so L-BFGS state lives over arrays only
     params, static = eqx.partition(model, eqx.is_inexact_array)
 
-    def loss_p(p):
-        return exact_loss_dyn(eqx.combine(p, static))
-
     @eqx.filter_jit
-    def val_bce(p, rows):
+    def val_bce(p, rows, data):
         m = eqx.combine(p, static)
         k_aug, k_perm = jax.random.split(val_key)
         obs, hyp = make_batch(data, jnp.asarray(rows), k_aug)
@@ -101,10 +104,15 @@ def exact_polish(
 
     opt = optax.lbfgs(memory_size=memory_size)
     state = opt.init(params)
-    value_and_grad = optax.value_and_grad_from_state(loss_p)
 
     @jax.jit
-    def step(p, s):
+    def step(p, s, data, chunks):
+        # data/chunks enter as traced args; closures below capture TRACERS, not
+        # constants, so no executable embeds the dataset.
+        def loss_p(pp):
+            return exact_loss_fn(eqx.combine(pp, static), data, chunks)
+
+        value_and_grad = optax.value_and_grad_from_state(loss_p)
         value, grad = value_and_grad(p, state=s)
         updates, s = opt.update(grad, s, p, value=value, grad=grad, value_fn=loss_p)
         return optax.apply_updates(p, updates), s, value
@@ -113,8 +121,8 @@ def exact_polish(
     hist = []
     for it in range(max_iters):
         t0 = time.time()
-        params, state, value = step(params, state)
-        v = float(val_bce(params, val_idx))
+        params, state, value = step(params, state, data, chunks_dev)
+        v = float(val_bce(params, val_idx, data))
         hist.append((float(value), v))
         if v < best[0]:
             best = (v, eqx.combine(params, static))
