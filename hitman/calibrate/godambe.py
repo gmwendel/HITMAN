@@ -68,20 +68,27 @@ def _msqrt(a: np.ndarray) -> np.ndarray:
 
 
 def adjustment_matrix(sw: SandwichResult) -> np.ndarray:
-    """Linear map A with A C_fisher A^T = C_godambe (symmetric square-root pairing).
+    """Linear map A with A C_fisher A^T = C_godambe, chosen as the OPTIMAL-TRANSPORT
+    (minimal-displacement) pairing A = Cf^-1/2 (Cf^1/2 Cg Cf^1/2)^1/2 Cf^-1/2.
 
-    On the unidentified null space of H (zeroed in both covariances by
-    ``estimate_sandwich``) the map acts as the IDENTITY — those directions pass
-    through unadjusted rather than being collapsed to the mode or inflated.
+    Any A with A Cf A^T = Cg is valid up to an orthogonal factor, and the choice
+    matters in practice: real chains have covariance != Cf (per-event curvature,
+    non-Gaussianity), so a pairing with a rotation component leaks one parameter's
+    correction into another (observed: E coverage overshooting at zen180 under the
+    naive square-root pairing). The OT map is symmetric positive-definite — zero
+    rotation — and reduces to the intuitive per-axis stretch when the covariances
+    commute. On the unidentified null space of H (zeroed in both covariances by
+    ``estimate_sandwich``) the map acts as the IDENTITY.
     """
-    s_f = _msqrt(sw.fisher_cov)
-    s_g = _msqrt(sw.godambe_cov)
-    A = s_g @ np.linalg.pinv(s_f)
-    # identity on the common null space: I - (projector onto range of fisher_cov)
-    w, v = np.linalg.eigh(sw.fisher_cov)
-    null = w <= 1e-12 * np.max(np.abs(w))
-    A += (v[:, null]) @ (v[:, null]).T
-    return A
+    w, v = np.linalg.eigh(0.5 * (sw.fisher_cov + sw.fisher_cov.T))
+    keep = w > 1e-12 * np.max(np.abs(w))
+    P = v[:, keep]
+    cf_r = P.T @ sw.fisher_cov @ P
+    cg_r = P.T @ sw.godambe_cov @ P
+    s_f = _msqrt(cf_r)
+    s_f_inv = np.linalg.inv(s_f)
+    A_r = s_f_inv @ _msqrt(s_f @ cg_r @ s_f) @ s_f_inv
+    return P @ A_r @ P.T + v[:, ~keep] @ v[:, ~keep].T
 
 
 def adjust_samples(samples: np.ndarray, mode: np.ndarray, sw: SandwichResult) -> np.ndarray:
