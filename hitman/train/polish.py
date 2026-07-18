@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from hitman.train.loop import _batch_loss
+from hitman.train.loop import _batch_loss, _unpack_batch
 
 
 def make_exact_loss(make_batch, rows_all, key, chunk_size: int = 2**19,
@@ -46,8 +46,8 @@ def make_exact_loss(make_batch, rows_all, key, chunk_size: int = 2**19,
         def one_pairing(j):
             k = jax.random.fold_in(jax.random.fold_in(key, ci), j)
             k_aug, k_perm = jax.random.split(k)
-            obs, hyp = make_batch(data, rows, k_aug)
-            return _batch_loss(model, obs, hyp, k_perm, balance_weight)
+            obs, hyp, w = _unpack_batch(make_batch(data, rows, k_aug))
+            return _batch_loss(model, obs, hyp, k_perm, balance_weight, w)
 
         return jnp.mean(jnp.stack([one_pairing(j) for j in range(n_pairings)]))
 
@@ -108,8 +108,8 @@ def exact_polish(
     def val_bce(p, rows, data):
         m = eqx.combine(p, static)
         k_aug, k_perm = jax.random.split(val_key)
-        obs, hyp = make_batch(data, jnp.asarray(rows), k_aug)
-        return _batch_loss(m, obs, hyp, k_perm, balance_weight)
+        obs, hyp, w = _unpack_batch(make_batch(data, jnp.asarray(rows), k_aug))
+        return _batch_loss(m, obs, hyp, k_perm, balance_weight, w)
 
     opt = optax.lbfgs(memory_size=memory_size)
     state = opt.init(params)

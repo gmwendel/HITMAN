@@ -17,6 +17,18 @@ class NUTSResult(NamedTuple):
     log_density: jnp.ndarray  # (num_samples,)
     acceptance_rate: jnp.ndarray  # (num_samples,)
     is_divergent: jnp.ndarray  # (num_samples,) bool — should be ~all False
+    energy: jnp.ndarray = None  # (num_samples,) Hamiltonian energy per draw
+
+
+def e_bfmi(energy: jnp.ndarray) -> jnp.ndarray:
+    """Energy Bayesian fraction of missing information (Betancourt 2016).
+
+    E-BFMI = mean(diff(E)^2) / var(E); values < 0.3 flag momentum-resampling
+    inefficiency — for a neural surrogate logdensity this is the smoothness receipt
+    (rough/high-curvature ratio surfaces show up here before divergences do).
+    """
+    d = jnp.diff(energy)
+    return jnp.mean(d**2) / jnp.clip(jnp.var(energy), 1e-30)
 
 
 def sample_nuts(
@@ -37,9 +49,10 @@ def sample_nuts(
 
     def step(state, key):
         state, info = kernel.step(key, state)
-        return state, (state.position, state.logdensity, info.acceptance_rate, info.is_divergent)
+        return state, (state.position, state.logdensity, info.acceptance_rate,
+                       info.is_divergent, info.energy)
 
-    _, (positions, logdens, accept, divergent) = jax.lax.scan(
+    _, (positions, logdens, accept, divergent, energy) = jax.lax.scan(
         step, state, jax.random.split(sample_key, num_samples)
     )
     return NUTSResult(
@@ -47,6 +60,7 @@ def sample_nuts(
         log_density=logdens,
         acceptance_rate=accept,
         is_divergent=divergent,
+        energy=energy,
     )
 
 

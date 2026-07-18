@@ -22,7 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from hitman.train.loop import _batch_loss
+from hitman.train.loop import _batch_loss, _unpack_batch
 
 
 @dataclass
@@ -80,8 +80,8 @@ def train_recipe(
     @eqx.filter_jit
     def val_bce(model, data, rows, key):
         k_aug, k_loss = jax.random.split(key)
-        obs, hyp = make_batch(data, rows, k_aug)
-        return _batch_loss(model, obs, hyp, k_loss, balance_weight)
+        obs, hyp, w = _unpack_batch(make_batch(data, rows, k_aug))
+        return _batch_loss(model, obs, hyp, k_loss, balance_weight, w)
 
     def make_step(optimizer, batch_size):
         iota = jnp.arange(batch_size, dtype=jnp.int32)
@@ -92,8 +92,8 @@ def train_recipe(
             k_aug, k_loss = jax.random.split(key)
 
             def loss_fn(model):
-                obs, hyp = make_batch(data, rows, k_aug)
-                return _batch_loss(model, obs, hyp, k_loss, balance_weight)
+                obs, hyp, w = _unpack_batch(make_batch(data, rows, k_aug))
+                return _batch_loss(model, obs, hyp, k_loss, balance_weight, w)
 
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
             updates, opt_state = optimizer.update(grads, opt_state)

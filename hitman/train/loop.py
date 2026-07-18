@@ -32,12 +32,20 @@ class FitResult:
     best_epoch: int
 
 
-def _batch_loss(model, obs, hyp, key, balance_weight):
+def _batch_loss(model, obs, hyp, key, balance_weight, weights=None):
     # obs may be an array or a tuple of arrays (e.g. FrameHitNet's (pmt_id, t));
     # the marginal pairing permutes hypotheses, so size the permutation from hyp.
     joint = jax.vmap(model)(obs, hyp)
     marginal = jax.vmap(model)(obs, hyp[jax.random.permutation(key, hyp.shape[0])])
-    return nre_loss(joint, marginal, balance_weight)
+    return nre_loss(joint, marginal, balance_weight, weights)
+
+
+def _unpack_batch(out):
+    """A make_batch may return (obs, hyp) or (obs, hyp, weights); normalize to 3."""
+    if len(out) == 3:
+        return out
+    obs, hyp = out
+    return obs, hyp, None
 
 
 def _gather(obs, hyp, hyp_index, rows):

@@ -10,12 +10,26 @@ import jax.numpy as jnp
 
 
 def nre_loss(
-    joint_logits: jnp.ndarray, marginal_logits: jnp.ndarray, balance_weight: float = 0.0
+    joint_logits: jnp.ndarray, marginal_logits: jnp.ndarray, balance_weight: float = 0.0,
+    weights: jnp.ndarray = None,
 ) -> jnp.ndarray:
-    """Mean BCE for label-1 joint pairs and label-0 marginal pairs (+ BNRE penalty)."""
-    bce = 0.5 * (
-        jnp.mean(jax.nn.softplus(-joint_logits)) + jnp.mean(jax.nn.softplus(marginal_logits))
-    )
+    """Mean BCE for label-1 joint pairs and label-0 marginal pairs (+ BNRE penalty).
+
+    ``weights`` (per-row, depending on the OBSERVATION only — never on theta or the
+    pairing) reweights both class terms at the same x, so the Bayes-optimal logit is
+    unchanged (the weight cancels in the pointwise minimizer): this redirects
+    ACCURACY toward low-p(x) regions without biasing the learned ratio. Weights are
+    expected mean-1 under the training marginal (see hitman.train.reweight).
+    """
+    if weights is None:
+        bce = 0.5 * (
+            jnp.mean(jax.nn.softplus(-joint_logits)) + jnp.mean(jax.nn.softplus(marginal_logits))
+        )
+    else:
+        bce = 0.5 * (
+            jnp.mean(weights * jax.nn.softplus(-joint_logits))
+            + jnp.mean(weights * jax.nn.softplus(marginal_logits))
+        )
     balance = (
         jnp.mean(jax.nn.sigmoid(joint_logits)) + jnp.mean(jax.nn.sigmoid(marginal_logits)) - 1.0
     )
