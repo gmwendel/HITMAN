@@ -49,6 +49,45 @@ def self_normalization(marginal_logits):
     return float(np.mean(np.exp(logits)))
 
 
+def fit_temperature(joint_logits, marginal_logits, n_grid: int = 400):
+    """Fit a scalar temperature ``tau`` that recalibrates a ratio estimator.
+
+    The recalibrated logit is ``logit / tau``; ``tau`` minimizes the composed
+    classification BCE over joint (label 1) and marginal (label 0) logits::
+
+        L(beta) = mean softplus(-beta * l_joint) + mean softplus(beta * l_marginal),
+        beta = 1 / tau .
+
+    ``L`` is convex in ``beta`` (a sum of softplus-of-linear terms), so a log-spaced
+    grid scan followed by parabolic refinement finds the global optimum without SciPy.
+    An estimator that is already calibrated returns ``tau ~ 1``; an overconfident one
+    returns ``tau > 1``. This is the calibration knob of TODO item A.1 and the
+    injectable miscalibration probe of the L1 temperature closure test.
+    """
+    lj = np.asarray(joint_logits, dtype=np.float64)
+    lm = np.asarray(marginal_logits, dtype=np.float64)
+
+    def loss(beta):
+        return np.mean(np.logaddexp(0.0, -beta * lj)) + np.mean(np.logaddexp(0.0, beta * lm))
+
+    betas = np.exp(np.linspace(np.log(1e-2), np.log(1e2), n_grid))
+    losses = np.array([loss(b) for b in betas])
+    i = int(np.argmin(losses))
+    lo = max(i - 1, 0)
+    hi = min(i + 1, n_grid - 1)
+    # parabolic interpolation in log-beta for a sub-grid optimum
+    xl, xm, xh = np.log(betas[lo]), np.log(betas[i]), np.log(betas[hi])
+    yl, ym, yh = losses[lo], losses[i], losses[hi]
+    denom = (xl - xm) * (xl - xh) * (xm - xh)
+    if denom != 0 and lo != hi:
+        a = (xh * (ym - yl) + xm * (yl - yh) + xl * (yh - ym)) / denom
+        b = (xh**2 * (yl - ym) + xm**2 * (yh - yl) + xl**2 * (ym - yh)) / denom
+        log_beta = -b / (2 * a) if a > 0 else xm
+    else:
+        log_beta = xm
+    return float(1.0 / np.exp(log_beta))
+
+
 def sbc_ranks(posterior_samples, truths):
     """Simulation-based calibration ranks.
 
