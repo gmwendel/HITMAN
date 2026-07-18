@@ -111,3 +111,24 @@ def test_from_store_matches_streaming_layout():
     rows = jnp.arange(min(500, data.n_hits))
     obs, _ = hit_batch(data, rows)
     np.testing.assert_allclose(np.asarray(obs), np.asarray(sub.hits)[: len(rows)], rtol=1e-6)
+
+
+def test_fit_resident_checkpoints(tmp_path):
+    import os
+
+    batch, pmt_pos = _toy_data(n_events=200, seed=31)
+    data = DeviceData.from_batch(batch, pmt_pos)
+    fit_resident(
+        HitNet(width=32, depth=2, key=jax.random.PRNGKey(0)),
+        data, hit_batch, data.n_hits,
+        key=jax.random.PRNGKey(1), batch_size=512, max_epochs=6, patience=6,
+        checkpoint_dir=str(tmp_path), checkpoint_every=2, verbose=False,
+    )
+    files = sorted(os.listdir(tmp_path))
+    assert "best.eqx" in files
+    assert sum(f.startswith("epoch_") for f in files) >= 3  # epochs 0, 2, 4
+    # snapshots load back into a skeleton
+    import equinox as eqx
+    m = eqx.tree_deserialise_leaves(
+        str(tmp_path / "best.eqx"), HitNet(width=32, depth=2, key=jax.random.PRNGKey(9)))
+    assert m is not None

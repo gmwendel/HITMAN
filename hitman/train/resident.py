@@ -12,6 +12,7 @@ Use ``fit_resident`` when the dataset fits in device memory (``DeviceData.nbytes
 check); ``hitman.train.fit`` remains the streaming path for larger-than-VRAM stores.
 """
 
+import os
 import time
 from typing import NamedTuple
 
@@ -142,6 +143,8 @@ def fit_resident(
     val_fraction: float = 0.1,
     max_val_rows: int = 2**16,
     balance_weight: float = 0.0,
+    checkpoint_dir: str = None,
+    checkpoint_every: int = 25,
     verbose: bool = True,
 ) -> FitResult:
     """Train an NRE model with every batch formed on-device (no host input path).
@@ -149,6 +152,13 @@ def fit_resident(
     Same semantics as ``hitman.train.fit`` (row split, early stopping, BNRE option);
     ``make_batch`` is ``hit_batch`` (n_rows = data.n_hits) or ``charge_batch``
     (n_rows = data.n_events), or any (data, rows) -> (obs, hyp) function.
+
+    When ``checkpoint_dir`` is given, the best-on-val model is written to
+    ``best.eqx`` on every improvement (crash safety for multi-hour runs) and a
+    trajectory snapshot ``epoch_<N>.eqx`` every ``checkpoint_every`` epochs is
+    KEPT (not rotated): BCE-val and the physics receipts are known to disagree
+    at the margin, so final model selection can be receipt-based over the
+    trajectory instead of committed to the BCE optimum. Snapshots are ~1 MB.
     """
     n_val = max(int(n_rows * val_fraction), 1)
     n_train = n_rows - n_val
@@ -202,6 +212,11 @@ def fit_resident(
         val_hist.append(v)
         if v < best[0]:
             best = (v, epoch, model)
+            if checkpoint_dir is not None:
+                eqx.tree_serialise_leaves(os.path.join(checkpoint_dir, "best.eqx"), model)
+        if checkpoint_dir is not None and epoch % checkpoint_every == 0:
+            eqx.tree_serialise_leaves(
+                os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.eqx"), model)
         if verbose:
             print(
                 f"epoch {epoch:4d}  train {train_hist[-1]:.5f}  val {v:.5f}  "
