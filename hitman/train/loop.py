@@ -121,16 +121,14 @@ def fit(
             _gather(obs, hyp, hyp_index, rows)
             for rows in block_shuffled_rows(n_train, batch_size, rng)
         )
-        epoch_loss, steps = 0.0, 0
+        losses = []
         for obs_b, hyp_b in prefetch(batches, size=2):
             key, step_key = jax.random.split(key)
             model, opt_state, loss = train_step(model, opt_state, obs_b, hyp_b, step_key)
-            epoch_loss += float(loss)
-            steps += 1
-        steps_per_epoch = max(steps, 1)
+            losses.append(loss)  # device scalar; sync once per epoch (audit finding 7)
         key, val_key = jax.random.split(key)
         v = float(val_loss_fn(model, val_key))
-        train_hist.append(epoch_loss / steps_per_epoch)
+        train_hist.append(float(jnp.mean(jnp.stack(losses))) if losses else float("nan"))
         val_hist.append(v)
         if v < best[0]:
             best = (v, epoch, model)

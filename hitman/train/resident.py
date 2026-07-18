@@ -85,6 +85,20 @@ class DeviceData(NamedTuple):
         )
 
 
+def _event_shifts(key, ev, time_sigma):
+    """Per-row N(0, sigma) time shift keyed on (key, event_id), counter-style.
+
+    O(batch) work instead of drawing normals for EVERY event in the dataset per step
+    (audit finding 5: a 5M-event draw is 20 MB of randoms per make_batch call, and
+    exact_polish re-evaluates make_batch ~380x per loss + again under remat). fold_in
+    per row keeps the coherent-per-event contract: same (key, event) -> same shift.
+    NOTE: changes the realized augmentation stream (statistics identical) — do not
+    flip mid-campaign on a resumable run.
+    """
+    return time_sigma * jax.vmap(
+        lambda e: jax.random.normal(jax.random.fold_in(key, e)))(ev)
+
+
 def hit_batch(data: DeviceData, rows: jnp.ndarray, key=None, time_sigma: float = 50.0):
     """Row indices -> (hit obs (B,4), hyp (B,7)), all gathers on device.
 
@@ -101,9 +115,9 @@ def hit_batch(data: DeviceData, rows: jnp.ndarray, key=None, time_sigma: float =
     t = data.t[rows]
     hyp = data.hyp[ev]
     if key is not None and time_sigma > 0:
-        shifts = time_sigma * jax.random.normal(key, (data.n_events,))
-        t = t + shifts[ev]
-        hyp = hyp.at[:, 5].add(shifts[ev])
+        sh = _event_shifts(key, ev, time_sigma)
+        t = t + sh
+        hyp = hyp.at[:, 5].add(sh)
     obs = jnp.concatenate([data.pmt_pos[data.pmt_id[rows]], t[:, None]], axis=1)
     return obs, hyp
 
@@ -118,9 +132,9 @@ def frame_hit_batch(data: DeviceData, rows: jnp.ndarray, key=None, time_sigma: f
     t = data.t[rows]
     hyp = data.hyp[ev]
     if key is not None and time_sigma > 0:
-        shifts = time_sigma * jax.random.normal(key, (data.n_events,))
-        t = t + shifts[ev]
-        hyp = hyp.at[:, 5].add(shifts[ev])
+        sh = _event_shifts(key, ev, time_sigma)
+        t = t + sh
+        hyp = hyp.at[:, 5].add(sh)
     return (data.pmt_id[rows], t), hyp
 
 
@@ -171,8 +185,11 @@ def fit_resident(
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
 
+    iota = jnp.arange(batch_size, dtype=jnp.int32)
+
     @eqx.filter_jit
-    def train_step(model, opt_state, data, rows, key):
+    def train_step(model, opt_state, data, start, key):
+        rows = start + iota
         k_aug, k_loss = jax.random.split(key)
 
         def loss_fn(model):
@@ -201,7 +218,6 @@ def fit_resident(
     # tables were the dominant epoch cost) and the 4e8-row permutation reduces to
     # shuffling window offsets. A per-epoch random phase decorrelates window edges.
     perm_rng = np.random.default_rng(int(jax.random.randint(key, (), 0, 2**31 - 1)))
-    iota = jnp.arange(batch_size, dtype=jnp.int32)
     for epoch in range(max_epochs):
         t0 = time.time()
         phase = int(perm_rng.integers(0, batch_size)) if n_train > 2 * batch_size else 0
@@ -209,9 +225,9 @@ def fit_resident(
         starts = perm_rng.permutation(n_windows).astype(np.int64) * batch_size + phase
         losses = []
         for step in range(min(steps_per_epoch, n_windows)):
-            rows = jnp.asarray(np.int32(starts[step])) + iota
             key, step_key = jax.random.split(key)
-            model, opt_state, loss = train_step(model, opt_state, data, rows, step_key)
+            model, opt_state, loss = train_step(
+                model, opt_state, data, jnp.asarray(starts[step], jnp.int32), step_key)
             losses.append(loss)  # device scalar; no per-step sync
         v = float(val_loss_fn(model, data, val_rows, val_key))
         train_hist.append(float(jnp.mean(jnp.stack(losses))))

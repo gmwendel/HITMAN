@@ -66,15 +66,17 @@ def make_weighted_hit_batch(table: HitWeightTable, obs_style: str = "xyz",
     looked up at the AUGMENTED hit time (the histogram was built augmented too).
     """
 
+    from hitman.train.resident import _event_shifts
+
     def make(data, rows, key=None):
         ev = data.event_id[rows]
         pmt = data.pmt_id[rows]
         t = data.t[rows]
         hyp = data.hyp[ev]
         if key is not None and time_sigma > 0:
-            shifts = time_sigma * jax.random.normal(key, (data.n_events,))
-            t = t + shifts[ev]
-            hyp = hyp.at[:, 5].add(shifts[ev])
+            sh = _event_shifts(key, ev, time_sigma)
+            t = t + sh
+            hyp = hyp.at[:, 5].add(sh)
         w = lookup_weights(table, pmt, t)
         if obs_style == "id_t":
             return (pmt, t), hyp, w

@@ -63,6 +63,7 @@ def train_recipe(
     max_val_rows: int = 2**16,
     balance_weight: float = 0.0,
     checkpoint_dir: str = None,
+    snapshot_every: int = 1,
     verbose: bool = True,
 ) -> RecipeResult:
     """Two-stage staged training in one loop with a shared validation yardstick."""
@@ -127,7 +128,9 @@ def train_recipe(
                     if checkpoint_dir is not None:
                         eqx.tree_serialise_leaves(
                             os.path.join(checkpoint_dir, "best.eqx"), model)
-                if checkpoint_dir is not None:
+                if checkpoint_dir is not None and (s // val_every) % snapshot_every == 0:
+                    # trajectory snapshots feed receipt-based selection; gate with
+                    # snapshot_every if the file writes ever matter (~1 MB each)
                     eqx.tree_serialise_leaves(
                         os.path.join(checkpoint_dir, f"{name}_step{s:07d}.eqx"), model)
                 if v < gate - min_delta:
