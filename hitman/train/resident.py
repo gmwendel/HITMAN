@@ -194,16 +194,22 @@ def fit_resident(
     best = (np.inf, 0, model)
     train_hist, val_hist = [], []
 
-    # Epoch permutations are generated host-side: a device permutation of ~4e8 rows
-    # needs multi-GB sort workspace on top of the resident data (OOM at 5M events);
-    # shipping just the batch's row indices costs ~0.5 MB/step.
+    # Batches are contiguous row windows in shuffled order (block sampling): rows
+    # group by event and events are written in iid order, so a window is ~10^3 iid
+    # events — statistically equivalent to a full shuffle for SGD, while the gathers
+    # become coalesced DRAM reads (at 5M events, random-row gathers into ~6 GB of
+    # tables were the dominant epoch cost) and the 4e8-row permutation reduces to
+    # shuffling window offsets. A per-epoch random phase decorrelates window edges.
     perm_rng = np.random.default_rng(int(jax.random.randint(key, (), 0, 2**31 - 1)))
+    iota = jnp.arange(batch_size, dtype=jnp.int32)
     for epoch in range(max_epochs):
         t0 = time.time()
-        perm = perm_rng.permutation(n_train).astype(np.int32)
+        phase = int(perm_rng.integers(0, batch_size)) if n_train > 2 * batch_size else 0
+        n_windows = (n_train - phase) // batch_size
+        starts = perm_rng.permutation(n_windows).astype(np.int64) * batch_size + phase
         losses = []
-        for step in range(steps_per_epoch):
-            rows = jnp.asarray(perm[step * batch_size:(step + 1) * batch_size])
+        for step in range(min(steps_per_epoch, n_windows)):
+            rows = jnp.asarray(np.int32(starts[step])) + iota
             key, step_key = jax.random.split(key)
             model, opt_state, loss = train_step(model, opt_state, data, rows, step_key)
             losses.append(loss)  # device scalar; no per-step sync
