@@ -184,13 +184,16 @@ def fit_resident(
     best = (np.inf, 0, model)
     train_hist, val_hist = [], []
 
+    # Epoch permutations are generated host-side: a device permutation of ~4e8 rows
+    # needs multi-GB sort workspace on top of the resident data (OOM at 5M events);
+    # shipping just the batch's row indices costs ~0.5 MB/step.
+    perm_rng = np.random.default_rng(int(jax.random.randint(key, (), 0, 2**31 - 1)))
     for epoch in range(max_epochs):
         t0 = time.time()
-        key, perm_key = jax.random.split(key)
-        perm = jax.random.permutation(perm_key, n_train)
+        perm = perm_rng.permutation(n_train).astype(np.int32)
         losses = []
         for step in range(steps_per_epoch):
-            rows = jax.lax.dynamic_slice_in_dim(perm, step * batch_size, batch_size)
+            rows = jnp.asarray(perm[step * batch_size:(step + 1) * batch_size])
             key, step_key = jax.random.split(key)
             model, opt_state, loss = train_step(model, opt_state, data, rows, step_key)
             losses.append(loss)  # device scalar; no per-step sync
