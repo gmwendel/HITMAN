@@ -78,9 +78,18 @@ def exact_polish(
     max_val_rows: int = 2**19,
     balance_weight: float = 0.0,
     memory_size: int = 10,
+    checkpoint_dir: str = None,
     verbose: bool = True,
 ):
-    """L-BFGS on the exact frozen empirical risk; returns (best-on-val model, history)."""
+    """L-BFGS on the exact frozen empirical risk; returns (best-on-val model, history).
+
+    With ``checkpoint_dir``, every iteration's model is written as ``iter_<N>.eqx``
+    (plus ``best.eqx`` on val improvement) so the polish trajectory can be receipted
+    step by step — BCE-val and physics receipts are known to disagree at the margin.
+    """
+    import os as _os
+    if checkpoint_dir is not None:
+        _os.makedirs(checkpoint_dir, exist_ok=True)
     n_val = max(int(n_rows * val_fraction), 1)
     train_rows = np.arange(0, n_rows - n_val, dtype=np.int32)
     val_idx = np.arange(n_rows - n_val, n_rows, dtype=np.int32)
@@ -124,8 +133,15 @@ def exact_polish(
         params, state, value = step(params, state, data, chunks_dev)
         v = float(val_bce(params, val_idx, data))
         hist.append((float(value), v))
+        if checkpoint_dir is not None:
+            eqx.tree_serialise_leaves(
+                _os.path.join(checkpoint_dir, f"iter_{it:03d}.eqx"),
+                eqx.combine(params, static))
         if v < best[0]:
             best = (v, eqx.combine(params, static))
+            if checkpoint_dir is not None:
+                eqx.tree_serialise_leaves(
+                    _os.path.join(checkpoint_dir, "best.eqx"), eqx.combine(params, static))
         if verbose:
             print(f"lbfgs {it:3d}  exact {float(value):.6f}  val {v:.6f}  "
                   f"({time.time() - t0:.1f}s)", flush=True)
