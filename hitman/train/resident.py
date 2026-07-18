@@ -38,6 +38,8 @@ class DeviceData(NamedTuple):
     hyp: jnp.ndarray
     charge: jnp.ndarray
     pmt_pos: jnp.ndarray
+    pmt_dir: jnp.ndarray = None
+    pmt_type: jnp.ndarray = None
 
     @property
     def n_hits(self) -> int:
@@ -61,6 +63,10 @@ class DeviceData(NamedTuple):
             hyp=jnp.asarray(store.hyp, jnp.float32),
             charge=jnp.asarray(store.charge, jnp.float32),
             pmt_pos=jnp.asarray(store.pmt_pos, jnp.float32),
+            pmt_dir=(None if store.pmt_dir is None
+                     else jnp.asarray(store.pmt_dir, jnp.float32)),
+            pmt_type=(None if store.pmt_type is None
+                      else jnp.asarray(store.pmt_type, jnp.int32)),
         )
 
     @classmethod
@@ -99,6 +105,22 @@ def hit_batch(data: DeviceData, rows: jnp.ndarray, key=None, time_sigma: float =
         hyp = hyp.at[:, 5].add(shifts[ev])
     obs = jnp.concatenate([data.pmt_pos[data.pmt_id[rows]], t[:, None]], axis=1)
     return obs, hyp
+
+
+def frame_hit_batch(data: DeviceData, rows: jnp.ndarray, key=None, time_sigma: float = 50.0):
+    """Row indices -> (obs = (pmt_id, t), hyp) for FrameHitNet-style models.
+
+    Geometry stays inside the model (its tables); the batch carries only the sensor
+    index and the (augmented) hit time. Same time-shuffle contract as hit_batch.
+    """
+    ev = data.event_id[rows]
+    t = data.t[rows]
+    hyp = data.hyp[ev]
+    if key is not None and time_sigma > 0:
+        shifts = time_sigma * jax.random.normal(key, (data.n_events,))
+        t = t + shifts[ev]
+        hyp = hyp.at[:, 5].add(shifts[ev])
+    return (data.pmt_id[rows], t), hyp
 
 
 def charge_batch(data: DeviceData, rows: jnp.ndarray, key=None):

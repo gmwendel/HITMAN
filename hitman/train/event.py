@@ -68,10 +68,15 @@ def event_val_bce(
     row_chunks = rows.reshape(-1, chunk_size)
     w_chunks = weights.reshape(-1, chunk_size)
 
+    obs_style = getattr(hitnet, "obs_style", "xyz")
+
     @eqx.filter_jit
     def chunk_segsum(hitnet, data, rows, w, hyp_table):
         ids = data.pmt_id[rows]
-        obs = jnp.concatenate([data.pmt_pos[ids], data.t[rows, None]], axis=1)
+        if obs_style == "id_t":
+            obs = (ids, data.t[rows])
+        else:
+            obs = jnp.concatenate([data.pmt_pos[ids], data.t[rows, None]], axis=1)
         local = data.event_id[rows] - event_start
         logits = jax.vmap(hitnet)(obs, hyp_table[local]) * w
         return jax.ops.segment_sum(logits, local, num_segments=n_val)

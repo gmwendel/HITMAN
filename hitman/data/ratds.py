@@ -36,18 +36,43 @@ def _resolve_files(input_files):
     return resolved
 
 
-def pmt_positions(input_files) -> np.ndarray:
-    """(n_pmts, 3) PMT positions from the meta tree; must agree across files."""
-    pos = None
+def pmt_geometry(input_files):
+    """PMT geometry from the meta tree; must agree across files.
+
+    Returns (positions (n,3), directions (n,3), types (n,)); directions are the
+    pmtU/V/W unit vectors (x/y/z-aligned components of the PMT axis). Files without
+    direction branches yield directions=None.
+    """
+    pos = dirs = types = None
     for infile, _, _ in _resolve_files(input_files):
         with uproot.open(infile) as f:
-            m = f["meta;1"].arrays(["pmtX", "pmtY", "pmtZ"], library="np")
+            meta = f["meta;1"]
+            names = ["pmtX", "pmtY", "pmtZ"]
+            has_dir = all(b in meta.keys() for b in ("pmtU", "pmtV", "pmtW"))
+            if has_dir:
+                names += ["pmtU", "pmtV", "pmtW"]
+            has_type = "pmtType" in meta.keys()
+            if has_type:
+                names.append("pmtType")
+            m = meta.arrays(names, library="np")
         p = np.stack([m["pmtX"][0], m["pmtY"][0], m["pmtZ"][0]], axis=1).astype(np.float32)
+        d = (np.stack([m["pmtU"][0], m["pmtV"][0], m["pmtW"][0]], axis=1).astype(np.float32)
+             if has_dir else None)
+        ty = m["pmtType"][0].astype(np.int32) if has_type else None
+        if d is not None:
+            norms = np.linalg.norm(d, axis=1)
+            if not np.allclose(norms, 1.0, atol=1e-3):
+                d = d / np.clip(norms, 1e-9, None)[:, None]
         if pos is None:
-            pos = p
+            pos, dirs, types = p, d, ty
         elif p.shape != pos.shape or not np.allclose(p, pos):
             raise ValueError(f"{infile}: PMT geometry differs from {input_files[0]}")
-    return pos
+    return pos, dirs, types
+
+
+def pmt_positions(input_files) -> np.ndarray:
+    """(n_pmts, 3) PMT positions from the meta tree; must agree across files."""
+    return pmt_geometry(input_files)[0]
 
 
 def count_events_hits(input_files, step_size: str = "200 MB"):

@@ -21,7 +21,7 @@ import os
 
 import numpy as np
 
-from hitman.data.ratds import count_events_hits, iter_flat_chunks, pmt_positions
+from hitman.data.ratds import count_events_hits, iter_flat_chunks, pmt_geometry
 from hitman.data.structures import EventBatch
 
 _ARRAYS = {
@@ -41,7 +41,7 @@ def build_store(input_files, out_dir, step_size: str = "200 MB") -> "HitStore":
     # Pass 1 (cheap): count events and hits reading only the small per-PMT NPE branch,
     # so the output arrays can be preallocated at their exact final size.
     n_events, n_hits = count_events_hits(input_files, step_size=step_size)
-    pmt_pos = pmt_positions(input_files)
+    pmt_pos, pmt_dir, pmt_type = pmt_geometry(input_files)
 
     mm = {
         name: np.lib.format.open_memmap(
@@ -76,6 +76,10 @@ def build_store(input_files, out_dir, step_size: str = "200 MB") -> "HitStore":
     for arr in (*mm.values(), offsets):
         arr.flush()
     np.save(os.path.join(out_dir, "pmt_pos.npy"), pmt_pos)
+    if pmt_dir is not None:
+        np.save(os.path.join(out_dir, "pmt_dir.npy"), pmt_dir)
+    if pmt_type is not None:
+        np.save(os.path.join(out_dir, "pmt_type.npy"), pmt_type)
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump(
             {"input_files": list(input_files), "n_events": n_events, "n_hits": n_hits}, f
@@ -98,6 +102,9 @@ class HitStore:
         self.pmt_id = load("pmt_id.npy")
         self.hit_offsets = load("hit_offsets.npy")
         self.pmt_pos = load("pmt_pos.npy")
+        opt = lambda name: (load(name) if os.path.exists(os.path.join(path, name)) else None)  # noqa: E731
+        self.pmt_dir = opt("pmt_dir.npy")
+        self.pmt_type = opt("pmt_type.npy")
 
     @property
     def n_events(self) -> int:

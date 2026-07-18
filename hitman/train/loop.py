@@ -33,8 +33,10 @@ class FitResult:
 
 
 def _batch_loss(model, obs, hyp, key, balance_weight):
+    # obs may be an array or a tuple of arrays (e.g. FrameHitNet's (pmt_id, t));
+    # the marginal pairing permutes hypotheses, so size the permutation from hyp.
     joint = jax.vmap(model)(obs, hyp)
-    marginal = jax.vmap(model)(obs, hyp[jax.random.permutation(key, obs.shape[0])])
+    marginal = jax.vmap(model)(obs, hyp[jax.random.permutation(key, hyp.shape[0])])
     return nre_loss(joint, marginal, balance_weight)
 
 
