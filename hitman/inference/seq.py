@@ -87,11 +87,21 @@ subsample did) but at essentially baseline teacher cost -- pure added work -- an
 real-speedup config breaks a gate. This SHARPENS r4: the binding constraint is
 basin-selection accuracy on the tail, which the teacher's full both-cone-sign tight descent
 supplies and no width-32 surrogate -- distilled OR directly NRE-trained -- can shortcut.
-Activation ablation (student value+grad, np160 single core; all five lower BIT-EXACT to
-StableHLO, ``scripts/export_student_teacher_stablehlo.py``): mish 113 us (best logit
-fidelity, off-joint near-basin RMSE 0.69), hardswish 71 us (1.6x cheaper, RMSE 0.75, best
-end-to-end tail f(dNLL>1)=0 on both full-endgame anchors) -> the recommended search net;
-swish 82 us; relu/softplus worse fidelity. A direct-NRE width-32 control MATCHED the teacher
+Activation ablation (student value+grad, np160 single core; all SIX lower BIT-EXACT to
+StableHLO, ``scripts/export_student_teacher_stablehlo.py``). By off-joint near-basin logit
+RMSE / vg cost: mish 0.69 / 113 us (best fidelity), gelu 0.73 / 93 us, hardswish 0.75 /
+74 us, swish 0.79 / 83 us, relu/softplus worse. The paper's smoothness warning concerns the
+FINAL likelihood curvature, which here is ALWAYS the teacher's (mish, C-infinity) -- the
+student only does the SEARCH -- so it is structurally moot for the student surface; and the
+measured L-BFGS line-search FAILURE rate in the student search is 0-2% for every activation
+and is actually LOWEST for the C1 hardswish (0.0-0.2%), i.e. hardswish's non-smoothness does
+not bite here (its piecewise-linear regions are locally L-BFGS-friendly; kinks are rarely
+hit and any failure is recovered by the teacher endgame). Recommendation if search_net is
+ever revisited: gelu (C-infinity, near-mish fidelity at ~0.8x mish vg) if smoothness is
+weighted, else hardswish (cheapest, empirically fewest line-search failures, best
+end-to-end tail f(dNLL>1)=0). Each activation is a SEPARATELY distilled student (the
+activation is fixed at train time -- not a runtime swap). A direct-NRE width-32 control
+MATCHED the teacher
 on the data joint (logit RMSE 0.27 vs the distilled 0.60) but DIVERGED off-joint on the
 broadened search distribution (5.72 vs 0.85) and had the WORST handoff tail (bf700
 f(dNLL>1) 0.0067 vs distilled mish 0.0033, hardswish 0.000) -- the quantitative case for

@@ -25,12 +25,15 @@ def mish(x):
 
 # Named activation table. All lower cleanly to StableHLO (verified in
 # scripts/export_student_teacher_stablehlo.py). mish/swish/softplus are C-infinity smooth
-# (safe for the final likelihood's curvature); relu/hardswish are only C0/C1 -- adequate
-# for the SEARCH surface (the teacher endgame supplies the smooth final descent); the
-# round-5 receipts decide per activation.
+# (safe for the final likelihood's curvature) -- as are gelu and swish (SiLU); relu is C0
+# and hardswish only C1 (kinks at +/-3), adequate for the SEARCH surface (the teacher
+# endgame supplies the smooth final descent) but NOT if the student surface itself must be
+# curvature-clean. The round-5 receipts decide per activation; if smoothness is weighted,
+# swish/gelu are the C-infinity cheap options (prefer them over hardswish).
 ACTIVATIONS = {
     "mish": mish,
-    "swish": jax.nn.silu,          # x * sigmoid(x)
+    "swish": jax.nn.silu,          # x * sigmoid(x); C-infinity
+    "gelu": jax.nn.gelu,           # x * Phi(x) (tanh approx); C-infinity, smoother than hardswish
     "softplus": jax.nn.softplus,
     "relu": jax.nn.relu,
     "hardswish": jax.nn.hard_swish,
