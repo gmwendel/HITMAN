@@ -18,7 +18,8 @@ import pytest
 from hitman.inference.batched import (MLEConfig, PaddedEvents, batched_multistart_mle,
                                       make_padded_nll)
 from hitman.inference.compiled import CompiledMLEConfig, make_compiled_mle
-from hitman.inference.seq import make_sequential_mle, SequentialMLEResult
+from hitman.inference.mle import CHART_SCALE, chart_from_theta, theta_from_chart
+from hitman.inference.seq import _build_primitives, make_sequential_mle, SequentialMLEResult
 from hitman.nn import ChargeNet, HitNet
 
 
@@ -164,6 +165,64 @@ def test_degenerate_event_is_finite():
     theta = solve(hits, pmt_id, hits[:, 3], mask, charge)
     assert np.all(np.isfinite(theta))
     assert np.all(np.abs(theta[:3]) <= 800.0 + 1e-3)
+
+
+def test_t_scan_is_causal_argmin():
+    """The causal t line scan returns a chart point no worse (in NLL) than the input,
+    and it recovers a deliberately mis-set emission time."""
+    hitnet, chargenet = _toy_nets(jax.random.PRNGKey(20))
+    padded = _toy_events(jax.random.PRNGKey(21), n_events=6, n_pad=32)
+    p = _build_primitives(hitnet, chargenet, CompiledMLEConfig(t_range=(-10.0, 10.0)), 32,
+                          t_grid_n=16)
+    t_scan, nll_true = p["t_scan"], p["nll_true"]
+    for i in range(6):
+        e_hit = jax.vmap(hitnet.embed_hit)(padded.hits[i])
+        # start from a point with a deliberately bad emission time
+        u0 = jnp.asarray(chart_from_theta(jnp.array([50.0, -30.0, 20.0, 1.0, 0.5, 9.5, 2.0]))
+                         / CHART_SCALE)
+        u_ts = t_scan(u0, e_hit, padded.mask[i], padded.charge[i])
+        f0 = float(nll_true(u0, e_hit, padded.mask[i], padded.charge[i]))
+        f1 = float(nll_true(u_ts, e_hit, padded.mask[i], padded.charge[i]))
+        assert f1 <= f0 + 1e-4, f"t_scan increased NLL ({f1:.3f} > {f0:.3f})"
+        # only the t slot (chart idx 6) is changed
+        assert np.allclose(np.asarray(u0)[[0, 1, 2, 3, 4, 5, 7]],
+                           np.asarray(u_ts)[[0, 1, 2, 3, 4, 5, 7]])
+
+
+def test_subsample_matches_full_nll():
+    """Coarse-to-fine subset search + full endgame lands at the same NLL as full-set
+    search (the endgame/polish run on all hits, so accuracy is preserved)."""
+    hitnet, chargenet = _toy_nets(jax.random.PRNGKey(22))
+    padded = _toy_events(jax.random.PRNGKey(23), n_events=8, n_pad=32)
+    cfg = CompiledMLEConfig()
+    full = make_sequential_mle(hitnet, chargenet, cfg, n_pad=32, subsample=False)
+    sub = make_sequential_mle(hitnet, chargenet, cfg, n_pad=32, subsample=True, n_sub=16)
+    th_full = np.stack([full(padded.hits[i], padded.pmt_id[i], padded.t[i], padded.mask[i],
+                             padded.charge[i]) for i in range(8)])
+    th_sub = np.stack([sub(padded.hits[i], padded.pmt_id[i], padded.t[i], padded.mask[i],
+                           padded.charge[i]) for i in range(8)])
+    dnll = _nll_batch(hitnet, chargenet, th_sub, padded) - \
+        _nll_batch(hitnet, chargenet, th_full, padded)
+    assert np.median(dnll) < 0.1
+    assert np.percentile(dnll, 90) < 0.5
+    assert np.all(np.isfinite(th_sub))
+
+
+def test_robust_t_still_bounded_and_deterministic():
+    """robust_t + subsample keep the box and byte-for-byte determinism."""
+    hitnet, chargenet = _toy_nets(jax.random.PRNGKey(24))
+    padded = _toy_events(jax.random.PRNGKey(25), n_events=4, n_pad=32)
+    cfg = CompiledMLEConfig(radius=800.0, half_height=800.0, t_range=(-10.0, 10.0),
+                            e_range=(0.5, 8.0))
+    solve = make_sequential_mle(hitnet, chargenet, cfg, n_pad=32, robust_t=True,
+                                subsample=True, n_sub=16)
+    args = (padded.hits[0], padded.pmt_id[0], padded.t[0], padded.mask[0], padded.charge[0])
+    a, b = solve(*args), solve(*args)
+    assert np.array_equal(a, b)
+    th = np.stack([solve(padded.hits[i], padded.pmt_id[i], padded.t[i], padded.mask[i],
+                         padded.charge[i]) for i in range(4)])
+    assert np.all(np.abs(th[:, :3]) <= 800.0 + 1e-3)
+    assert np.all((th[:, 5] >= -10.0 - 1e-3) & (th[:, 5] <= 10.0 + 1e-3))
 
 
 if __name__ == "__main__":
