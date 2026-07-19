@@ -119,3 +119,77 @@ def make_weighted_charge_batch(table: ChargeWeightTable):
         return c, data.hyp[rows], table.w[n]
 
     return make
+
+
+class BrightnessWeightTable(NamedTuple):
+    w: jnp.ndarray   # (n_max+1,) weights indexed by parent-event nhit; mean-1 over HITS
+    alpha: float
+
+
+def build_brightness_weights(store, *, alpha: float = 0.25, n_max: int = 400,
+                             w_max: float = 100.0) -> BrightnessWeightTable:
+    """Per-HIT weight ``w(nhit_event) ∝ p̂(nhit)^(−α)``: the E-wall fix on the HITNET.
+
+    The measured E-wall (paired E-ridge −0.437 MeV at 8 MeV even at the detector
+    center) is localized in the hitnet: 8 MeV events (~156 hits) sit in the sparse
+    upper tail of a 0–10 MeV-flat training set (mean ~98 PE), so the BCE risk under-
+    trains the (sensor,t) density exactly where brightness is high. This table maps a
+    hit's PARENT-EVENT multiplicity to a weight; ``make_brightness_weighted_hit_batch``
+    then upweights every hit belonging to a bright event.
+
+    Why brightness and not the (sensor,t) marginal (run11): a pure obs-only weight is
+    ratio-preserving and merely redistributes accuracy WITHIN the bulk marginal — it
+    cannot move mass toward the high-E tail (it "buys nothing"). Event brightness is
+    monotone in energy, so for JOINT pairs (whose θ_E ≈ the parent's true energy) the
+    weight acts as an importance reweighting of the training density toward the
+    under-represented high-E tail — the axis the wall actually lives on.
+
+    Normalization is over the HIT population (Σ_e n_e·w(n_e) / Σ_e n_e = 1), so the
+    mean per-hit weight is 1 and the per-hit gradient scale matches the unweighted
+    loss (``nre_loss`` takes an unnormalized ``jnp.mean(w··)``). Weights are clipped at
+    ``w_max`` and renormalized (tail-explosion guard, as for the other tables).
+    """
+    n = np.clip(np.asarray(store.charge[:, 1]).astype(np.int64), 0, n_max)
+    h = np.bincount(n, minlength=n_max + 1).astype(np.float64)   # events per nhit bin
+    p = (h + 0.5) / (h + 0.5).sum()
+    w = p ** (-alpha)
+    nvals = np.arange(n_max + 1, dtype=np.float64)
+    hitmass = h * nvals                       # hits contributed by each nhit bin
+    hitmass = hitmass / hitmass.sum()         # per-HIT distribution over parent nhit
+    w = w / np.sum(hitmass * w)               # E_hit[w] = 1
+    w = np.minimum(w, w_max)
+    w = w / np.sum(hitmass * w)               # renormalize after the clip
+    return BrightnessWeightTable(w=jnp.asarray(w, jnp.float32), alpha=float(alpha))
+
+
+def make_brightness_weighted_hit_batch(table: BrightnessWeightTable, obs_style: str = "xyz",
+                                       time_sigma: float = 50.0):
+    """A hit make_batch returning (obs, hyp, weights) — drop-in for train_recipe/fit_resident.
+
+    Each hit inherits its PARENT event's brightness weight ``w(nhit_event)`` from
+    ``table`` (parent nhit = ``data.charge[event_id, 1]``). Identical time-shuffle
+    augmentation contract to ``hit_batch``/``make_weighted_hit_batch``: with a key, each
+    event's time origin shifts by N(0, time_sigma) ns coherently in its hit times and
+    its hypothesis time (the brightness weight is time-invariant, so the shift does not
+    touch it).
+    """
+
+    from hitman.train.resident import _event_shifts
+
+    def make(data, rows, key=None):
+        ev = data.event_id[rows]
+        pmt = data.pmt_id[rows]
+        t = data.t[rows]
+        hyp = data.hyp[ev]
+        if key is not None and time_sigma > 0:
+            sh = _event_shifts(key, ev, time_sigma)
+            t = t + sh
+            hyp = hyp.at[:, 5].add(sh)
+        nhit = jnp.clip(data.charge[ev, 1].astype(jnp.int32), 0, table.w.shape[0] - 1)
+        w = table.w[nhit]
+        if obs_style == "id_t":
+            return (pmt, t), hyp, w
+        obs = jnp.concatenate([data.pmt_pos[pmt], t[:, None]], axis=1)
+        return obs, hyp, w
+
+    return make
