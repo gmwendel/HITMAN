@@ -104,3 +104,20 @@ def test_e_bfmi():
     assert 1.8 < v < 2.2          # iid energies: E[(dE)^2] = 2 var(E)
     e_slow = np.cumsum(rng.standard_normal(20000) * 0.01)  # random walk: tiny diffs
     assert float(e_bfmi(jnp.asarray(e_slow))) < 0.3
+
+
+def test_charge_weights():
+    from hitman.train import build_charge_weights, make_weighted_charge_batch
+    batch, pmt_pos = _toy_data(n_events=400, seed=13)
+    st = _fake_store(batch, pmt_pos)
+    tab = build_charge_weights(st, alpha=0.5, n_max=100)
+    h = np.bincount(np.clip(st.charge[:, 1].astype(int), 0, 100), minlength=101)
+    p = (h + 0.5) / (h + 0.5).sum()
+    np.testing.assert_allclose(np.sum(p * np.asarray(tab.w)), 1.0, rtol=1e-5)
+    # rarer multiplicities get larger weights
+    common = np.argmax(h)
+    rare = np.argmin(np.where(h > 0, h, h.max()))
+    assert tab.w[rare] >= tab.w[common]
+    data = DeviceData.from_batch(batch, pmt_pos)
+    obs, hyp, w = make_weighted_charge_batch(tab)(data, jnp.arange(64), None)
+    assert w.shape == (64,) and np.isfinite(np.asarray(w)).all()

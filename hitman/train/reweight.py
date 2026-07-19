@@ -84,3 +84,38 @@ def make_weighted_hit_batch(table: HitWeightTable, obs_style: str = "xyz",
         return obs, hyp, w
 
     return make
+
+
+class ChargeWeightTable(NamedTuple):
+    w: jnp.ndarray   # (n_max+1,) mean-1 weights indexed by nhit
+    alpha: float
+
+
+def build_charge_weights(store, *, alpha: float = 0.5, n_max: int = 400,
+                         w_max: float = 100.0) -> ChargeWeightTable:
+    """w(nhit) ∝ p̂(nhit)^(−α): the charge-axis version of the tail reweighting.
+
+    Bright events live in the sparse upper tail of the multiplicity marginal —
+    the measured energy-axis wall (E bias −0.9 MeV at 8 MeV even at the detector
+    center) is the prior-weighted-accuracy tax on this axis. Same normalization
+    contract as the hit table: E_p̂[w] = 1, clipped at ``w_max``.
+    """
+    n = np.clip(np.asarray(store.charge[:, 1]).astype(np.int64), 0, n_max)
+    h = np.bincount(n, minlength=n_max + 1).astype(np.float64)
+    p = (h + 0.5) / (h + 0.5).sum()
+    w = p ** (-alpha)
+    w = w / np.sum(p * w)
+    w = np.minimum(w, w_max)
+    w = w / np.sum(p * w)
+    return ChargeWeightTable(w=jnp.asarray(w, jnp.float32), alpha=float(alpha))
+
+
+def make_weighted_charge_batch(table: ChargeWeightTable):
+    """A charge make_batch returning (obs, hyp, weights); drop-in for the loops."""
+
+    def make(data, rows, key=None):
+        c = data.charge[rows]
+        n = jnp.clip(c[:, 1].astype(jnp.int32), 0, table.w.shape[0] - 1)
+        return c, data.hyp[rows], table.w[n]
+
+    return make
