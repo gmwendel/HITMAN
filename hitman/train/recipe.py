@@ -62,11 +62,21 @@ def train_recipe(
     val_fraction: float = 0.1,
     max_val_rows: int = 2**16,
     balance_weight: float = 0.0,
+    extra_loss=None,
     checkpoint_dir: str = None,
     snapshot_every: int = 1,
     verbose: bool = True,
 ) -> RecipeResult:
-    """Two-stage staged training in one loop with a shared validation yardstick."""
+    """Two-stage staged training in one loop with a shared validation yardstick.
+
+    ``extra_loss(model, data, key) -> scalar``, when given, is added to the training
+    BCE every step (e.g. the score-identity penalty from hitman.train.identities —
+    pass it pre-scaled by its lambda). It receives ``data`` as an argument so large
+    arrays ride the jit tracer instead of being closure-captured into the compiled
+    step as constants (a 4 GB capture hard-locked the box on 2026-07-19). It is
+    deliberately NOT added to the validation yardstick: validation stays the pure
+    comparable BCE, and the extra term's effect is judged by its own receipts.
+    """
     cosine_batch = cosine_batch or 2 * sgd_batch
     n_val = max(int(n_rows * val_fraction), 1)
     n_train = n_rows - n_val
@@ -90,11 +100,14 @@ def train_recipe(
         @eqx.filter_jit
         def step(model, opt_state, data, start, key):
             rows = jnp.asarray(start, jnp.int32) + iota
-            k_aug, k_loss = jax.random.split(key)
+            k_aug, k_loss, k_extra = jax.random.split(key, 3)
 
             def loss_fn(model):
                 obs, hyp, w = _unpack_batch(make_batch(data, rows, k_aug))
-                return _batch_loss(model, obs, hyp, k_loss, balance_weight, w)
+                loss = _batch_loss(model, obs, hyp, k_loss, balance_weight, w)
+                if extra_loss is not None:
+                    loss = loss + extra_loss(model, data, k_extra)
+                return loss
 
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
             updates, opt_state = optimizer.update(grads, opt_state)
