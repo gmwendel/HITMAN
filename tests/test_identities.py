@@ -166,3 +166,99 @@ def test_extra_loss_scales_with_lam():
         vals.append(float(loss(net, data, jax.random.PRNGKey(0))))
     assert vals[0] != 0.0  # min_half gate must not have zeroed the penalty
     assert vals[1] == pytest.approx(5.0 * vals[0], rel=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# GMM-weighted moment penalty
+# ---------------------------------------------------------------------------
+from hitman.train.identities import (GmmCfg, StratifiedSpec, gmm_moment_penalty,
+                                     make_gmm_loss, make_stratified_batch)
+from hitman.train.moments import N_LEAN
+
+
+GCFG = GmmCfg(
+    mult=1.0, ramp_steps=100.0,
+    edges=jnp.array([E_LO, 5.0, E_HI]),
+    W=jnp.stack([jnp.eye(N_LEAN)] * 2),
+    bounds=jnp.full((2, N_LEAN), np.inf),
+    n_events=2048, n_pad=N_PAD, time_sigma=0.0,
+)
+
+
+def _gmm_penalties(net, n_keys=12, seed=0):
+    pen = jax.jit(lambda b, k: gmm_moment_penalty(net, zero_chargenet, b, GCFG, k))
+    out = []
+    for i in range(n_keys):
+        kd, ks = jax.random.split(jax.random.PRNGKey(seed + 1000 * i))
+        out.append(float(pen(gen_batch(kd, 2048), ks)))
+    return np.array(out)
+
+
+def test_gmm_exact_model_zero():
+    p = _gmm_penalties(ExactNet())
+    se = p.std(ddof=1) / np.sqrt(len(p))
+    assert abs(p.mean()) < 4 * se, f"exact ratio violates GMM moments: {p.mean():.4f}±{se:.4f}"
+
+
+def test_gmm_detects_tilt_with_estimated_W():
+    # Two-step GMM in miniature: estimate W from the EXACT model's per-event lean
+    # vectors (the frozen-W protocol), then the tilt must stand out sharply — with
+    # W = I it would drown in unweighted Bartlett noise, which is the point of W.
+    from hitman.train.moments import estimate_blocks, lean_vector
+
+    def lean_batch(net, batch):
+        hits, mask, charge, theta = batch
+
+        def one(h, m, c, th):
+            def ll(t):
+                return jnp.sum(jax.vmap(lambda hh: net(hh, t))(h) * m)
+
+            return lean_vector(jax.grad(ll)(th), jax.hessian(ll)(th), th)
+
+        return np.asarray(jax.vmap(one)(hits, mask, charge, theta))
+
+    batch0 = gen_batch(jax.random.PRNGKey(99), 8192)
+    m0 = lean_batch(ExactNet(), batch0)
+    strata = (np.asarray(batch0[3][:, 6]) > 5.0).astype(int)
+    blocks = estimate_blocks(m0, strata, 2)
+    cfg = GCFG._replace(W=jnp.asarray(blocks["W"], jnp.float32))
+    pen = jax.jit(lambda net_eps, b, k: gmm_moment_penalty(
+        TiltedNet(net_eps), zero_chargenet, b, cfg, k))
+    p, p0 = [], []
+    for i in range(12):
+        kd, ks = jax.random.split(jax.random.PRNGKey(2000 + i))
+        b = gen_batch(kd, 2048)
+        p.append(float(pen(0.08, b, ks)))
+        p0.append(float(pen(0.0, b, ks)))
+    p, p0 = np.array(p), np.array(p0)
+    assert p.mean() > p0.mean() + 10 * p0.std(ddof=1)
+
+
+def test_stratified_batch_occupancy_and_ramp():
+    offsets = np.arange(0, 8 * 65, 8)              # 64 events, 8 hits each
+    e_vals = np.concatenate([np.full(50, 2.0), np.full(14, 8.0)])  # unbalanced strata
+    data = DeviceData(
+        t=jnp.zeros(8 * 64), pmt_id=jnp.zeros(8 * 64, jnp.int32),
+        event_id=jnp.asarray(np.repeat(np.arange(64), 8), jnp.int32),
+        hyp=jnp.zeros((64, 7)).at[:, 6].set(jnp.asarray(e_vals)),
+        charge=jnp.zeros((64, 2)), pmt_pos=jnp.asarray([[0.0, 0.0, 0.0]]),
+    )
+    elig = np.stack([np.resize(np.flatnonzero(e_vals == 2.0), 50),
+                     np.resize(np.flatnonzero(e_vals == 8.0), 50)])
+    spec = StratifiedSpec(offsets=jnp.asarray(offsets, jnp.int32),
+                          elig=jnp.asarray(elig, jnp.int32),
+                          counts=jnp.asarray([50, 14], jnp.int32))
+    cfg = GCFG._replace(n_events=32, n_pad=8)
+    hits, mask, charge, theta = make_stratified_batch(data, spec, jax.random.PRNGKey(0), cfg)
+    k = np.asarray(theta[:, 6] > 5.0)
+    assert k.sum() == 16 and (~k).sum() == 16     # equalized despite 50/14 pool
+    # ramp: step 0 -> 0, step >= ramp_steps -> full value; linear in between
+    net = TiltedNet(0.1)
+    loss = make_gmm_loss(zero_chargenet, spec, cfg._replace(min_half=2))
+    v0 = float(loss(net, data, jax.random.PRNGKey(1), jnp.asarray(0.0)))
+    v50 = float(loss(net, data, jax.random.PRNGKey(1), jnp.asarray(50.0)))
+    v100 = float(loss(net, data, jax.random.PRNGKey(1), jnp.asarray(100.0)))
+    v200 = float(loss(net, data, jax.random.PRNGKey(1), jnp.asarray(200.0)))
+    assert v0 == 0.0 and v100 != 0.0
+    assert v50 == pytest.approx(0.5 * v100, rel=1e-5)
+    assert v200 == pytest.approx(v100, rel=1e-5)

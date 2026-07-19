@@ -69,13 +69,14 @@ def train_recipe(
 ) -> RecipeResult:
     """Two-stage staged training in one loop with a shared validation yardstick.
 
-    ``extra_loss(model, data, key) -> scalar``, when given, is added to the training
-    BCE every step (e.g. the score-identity penalty from hitman.train.identities —
-    pass it pre-scaled by its lambda). It receives ``data`` as an argument so large
-    arrays ride the jit tracer instead of being closure-captured into the compiled
-    step as constants (a 4 GB capture hard-locked the box on 2026-07-19). It is
-    deliberately NOT added to the validation yardstick: validation stays the pure
-    comparable BCE, and the extra term's effect is judged by its own receipts.
+    ``extra_loss(model, data, key, step) -> scalar``, when given, is added to the
+    training BCE every step (e.g. the score-identity / GMM moment penalties from
+    hitman.train.identities — pass them pre-scaled). It receives ``data`` as an
+    argument so large arrays ride the jit tracer instead of being closure-captured
+    into the compiled step as constants (a 4 GB capture hard-locked the box on
+    2026-07-19), and ``step`` as a traced scalar (warm-up ramps; no recompiles).
+    It is deliberately NOT added to the validation yardstick: validation stays the
+    pure comparable BCE, and the extra term's effect is judged by its own receipts.
     """
     cosine_batch = cosine_batch or 2 * sgd_batch
     n_val = max(int(n_rows * val_fraction), 1)
@@ -98,7 +99,7 @@ def train_recipe(
         iota = jnp.arange(batch_size, dtype=jnp.int32)
 
         @eqx.filter_jit
-        def step(model, opt_state, data, start, key):
+        def step(model, opt_state, data, start, key, step_no):
             rows = jnp.asarray(start, jnp.int32) + iota
             k_aug, k_loss, k_extra = jax.random.split(key, 3)
 
@@ -106,7 +107,7 @@ def train_recipe(
                 obs, hyp, w = _unpack_batch(make_batch(data, rows, k_aug))
                 loss = _batch_loss(model, obs, hyp, k_loss, balance_weight, w)
                 if extra_loss is not None:
-                    loss = loss + extra_loss(model, data, k_extra)
+                    loss = loss + extra_loss(model, data, k_extra, step_no)
                 return loss
 
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
@@ -118,9 +119,10 @@ def train_recipe(
     rng = np.random.default_rng(int(jax.random.randint(key, (), 0, 2**31 - 1)))
     best = (np.inf, model, "init", 0)   # global across stages
     history = []
+    gstep = 0   # global step across stages: warm-up ramps must not restart at cosine
 
     def run_stage(name, model, optimizer, batch_size, max_steps, key):
-        nonlocal best
+        nonlocal best, gstep
         step_fn = make_step(optimizer, batch_size)
         opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
         stream = _window_stream(n_train, batch_size, rng)
@@ -132,7 +134,9 @@ def train_recipe(
             # start must be a device array: filter_jit treats a Python int as a
             # STATIC argument and recompiles the step for every window start
             start = jnp.asarray(next(stream), jnp.int32)
-            model, opt_state, _ = step_fn(model, opt_state, data, start, sk)
+            gstep += 1
+            model, opt_state, _ = step_fn(model, opt_state, data, start, sk,
+                                          jnp.asarray(gstep, jnp.float32))
             if s % val_every == 0:
                 v = float(val_bce(model, data, val_rows, val_key))
                 history.append((name, s, v))

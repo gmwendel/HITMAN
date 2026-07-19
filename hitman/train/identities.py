@@ -152,9 +152,142 @@ def make_score_identity_loss(
     must escalate jax's captured-constants warning to an error (see
     train_run12_scoreid.py) so any regression aborts before the compile."""
 
-    def extra_loss(hitnet, data, key):
+    def extra_loss(hitnet, data, key, step=0.0):
         k_batch, k_split = jax.random.split(key)
         batch = make_identity_batch(data, spec, k_batch, cfg)
         return cfg.lam * score_identity_penalty(hitnet, chargenet, batch, cfg, k_split)
+
+    return extra_loss
+
+
+# ---------------------------------------------------------------------------
+# GMM-weighted moment penalty (two-step Hansen weighting; run14+)
+# ---------------------------------------------------------------------------
+
+class GmmCfg(NamedTuple):
+    """GMM moment-penalty configuration.
+
+    ``mult`` is the likelihood-units multiplier — CONVENTION, not theorem: the
+    moment quadratic's asymptotic -2 log-likelihood is n*Q, and we scale against
+    the (mean-form) BCE using the identity-batch n, i.e. mult = n_events /
+    (2 * n_bce_batch), times any documented safety factor. ``ramp_steps`` is a
+    pure optimization device (W is frozen at the linearization model's violations,
+    which sit at z~O(100) for a fresh net — unramped it would swamp the BCE early);
+    the final objective is exactly mult * Q. ``W`` (K, M, M) is the FROZEN shrunk
+    inverse covariance from gmm_moments_measure (two-step GMM: never estimated on
+    the training model/batch — a live W lets the optimizer game the objective by
+    inflating moment variances instead of shrinking means). ``bounds`` (K, M)
+    winsorize the per-event LEAN vectors at the measured P99.9.
+    """
+
+    mult: float
+    ramp_steps: float
+    edges: jnp.ndarray    # (K + 1,)
+    W: jnp.ndarray        # (K, M, M)
+    bounds: jnp.ndarray   # (K, M)
+    n_events: int = 520   # divisible by K: stratified occupancy
+    n_pad: int = 320
+    time_sigma: float = 50.0
+    min_half: int = 8
+
+
+class StratifiedSpec(NamedTuple):
+    """Per-stratum eligible event tables for occupancy-equalized identity batches."""
+
+    offsets: jnp.ndarray  # (n_events_total + 1,) int32
+    elig: jnp.ndarray     # (K, max_n) int32, row k padded by repetition
+    counts: jnp.ndarray   # (K,) int32
+
+
+def build_stratified_spec(store, n_pad: int, edges, lo: int = 0,
+                          hi: int = None) -> StratifiedSpec:
+    hi = store.n_events if hi is None else hi
+    nhit = np.diff(store.hit_offsets[lo : hi + 1])
+    e = np.asarray(store.hyp[lo:hi, 6])
+    k = np.clip(np.digitize(e, edges) - 1, 0, len(edges) - 2)
+    fits = nhit <= n_pad
+    rows, counts = [], []
+    for kk in range(len(edges) - 1):
+        ids = lo + np.flatnonzero(fits & (k == kk))
+        counts.append(len(ids))
+        rows.append(ids)
+    max_n = max(counts)
+    table = np.stack([np.resize(r, max_n) for r in rows])   # pad by repetition
+    return StratifiedSpec(offsets=jnp.asarray(store.hit_offsets, jnp.int32),
+                          elig=jnp.asarray(table, jnp.int32),
+                          counts=jnp.asarray(counts, jnp.int32))
+
+
+def make_stratified_batch(data, spec: StratifiedSpec, key, cfg: GmmCfg):
+    """Occupancy-equalized event-grouped batch: n_events/K events per stratum."""
+    k_ev, k_aug = jax.random.split(key)
+    K = spec.elig.shape[0]
+    per = cfg.n_events // K
+    u = jax.random.uniform(k_ev, (K, per))
+    idx = jnp.floor(u * spec.counts[:, None]).astype(jnp.int32)
+    ev = jnp.take_along_axis(spec.elig, idx, axis=1).reshape(-1)
+    start = spec.offsets[ev]
+    nh = spec.offsets[ev + 1] - start
+    slot = jnp.arange(cfg.n_pad, dtype=jnp.int32)
+    rows = jnp.minimum(start[:, None] + slot[None, :], data.n_hits - 1)
+    mask = (slot[None, :] < nh[:, None]).astype(jnp.float32)
+    t = data.t[rows]
+    theta = data.hyp[ev]
+    if cfg.time_sigma > 0:
+        sh = cfg.time_sigma * jax.random.normal(k_aug, (ev.shape[0],))
+        t = t + sh[:, None]
+        theta = theta.at[:, 5].add(sh)
+    pos = data.pmt_pos[data.pmt_id[rows]]
+    hits = jnp.concatenate([pos, t[..., None]], axis=-1) * mask[..., None]
+    return hits, mask, data.charge[ev], theta
+
+
+def gmm_moment_penalty(hitnet, chargenet, batch, cfg: GmmCfg, key) -> jnp.ndarray:
+    """Split-half weighted quadratic: sum_k <m̄_A, W_k m̄_B> per stratum.
+
+    Unbiased for sum_k mu_k^T W_k mu_k (the population GMM objective) — the
+    cross-form kills the tr(W S)/n term that would otherwise penalize the
+    variance of the moments (Fisher information for the score rows)."""
+    from hitman.train.moments import lean_vector
+
+    if getattr(hitnet, "obs_style", "xyz") != "xyz":
+        raise NotImplementedError("GMM identity batches carry xyzt hit rows")
+    hits, mask, charge, theta = batch
+
+    def one(h, m, c, th):
+        def ll(t):
+            return jnp.sum(jax.vmap(lambda hh: hitnet(hh, t))(h) * m) + chargenet(c, t)
+
+        g = jax.grad(ll)(th)
+        H = jax.hessian(ll)(th)
+        return lean_vector(g, H, th)
+
+    mv = jax.vmap(one)(hits, mask, charge, theta)               # (N, M)
+    K = cfg.W.shape[0]
+    k = jnp.clip(jnp.searchsorted(cfg.edges, theta[:, 6]) - 1, 0, K - 1)
+    mv = jnp.clip(mv, -cfg.bounds[k], cfg.bounds[k])
+    half = jax.random.bernoulli(key, 0.5, (mv.shape[0],))
+    seg = k * 2 + half.astype(jnp.int32)
+    sums = jax.ops.segment_sum(mv, seg, num_segments=2 * K)
+    cnts = jax.ops.segment_sum(jnp.ones_like(seg, jnp.float32), seg,
+                               num_segments=2 * K)
+    means = sums / jnp.maximum(cnts, 1.0)[:, None]
+    m_a, m_b = means[0::2], means[1::2]                          # (K, M)
+    valid = (jnp.minimum(cnts[0::2], cnts[1::2]) >= cfg.min_half).astype(jnp.float32)
+    q_k = jnp.einsum("ki,kij,kj->k", m_a, cfg.W, m_b)
+    return jnp.sum(valid * q_k)
+
+
+def make_gmm_loss(chargenet, spec: StratifiedSpec, cfg: GmmCfg) -> Callable:
+    """train_recipe extra_loss hook: ramp(step) * mult * Q on a fresh stratified
+    batch. DeviceData is a call-time argument (never closed over — see the 2026-07-19
+    lockup note on make_score_identity_loss)."""
+
+    def extra_loss(hitnet, data, key, step):
+        k_batch, k_split = jax.random.split(key)
+        batch = make_stratified_batch(data, spec, k_batch, cfg)
+        ramp = jnp.clip(step / jnp.maximum(cfg.ramp_steps, 1.0), 0.0, 1.0)
+        return ramp * cfg.mult * gmm_moment_penalty(
+            hitnet, chargenet, batch, cfg, k_split)
 
     return extra_loss
