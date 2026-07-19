@@ -321,3 +321,77 @@ def test_mlp_activation_static_and_backcompat():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_choose_buckets_matches_bruteforce():
+    import itertools
+    import numpy as np
+    from hitman.inference.seq import choose_buckets
+    rng = np.random.default_rng(0)
+    n = rng.integers(1, 128, 4000)
+    ladder = choose_buckets(n, max_buckets=3, grid=16, b_min=32, b_max=128,
+                            call_overhead_rows=8.0)
+    # brute force over all 3-subsets of the candidate grid containing the top rung
+    cands = [32, 48, 64, 80, 96, 112, 128]
+    top = max(c for c in cands if c >= n.max()) if n.max() > 32 else 32
+    def cost(lad):
+        lad = sorted(lad)
+        B = np.array(lad)[np.searchsorted(lad, n)]
+        return np.sum(B + 8.0)
+    best = None
+    for k in (1, 2, 3):
+        for combo in itertools.combinations([c for c in cands if c < 128], k - 1):
+            lad = sorted(combo) + [128]
+            if max(n) > 128:
+                continue
+            c = cost(lad)
+            if best is None or c < best[0]:
+                best = (c, lad)
+    assert abs(cost(ladder) - best[0]) / best[0] < 1e-9, (ladder, best)
+
+
+def test_choose_buckets_uniform_ladder_shape():
+    import numpy as np
+    from hitman.inference.seq import choose_buckets
+    n = np.random.default_rng(1).integers(1, 200, 20000)
+    lad = choose_buckets(n, max_buckets=8, grid=16, b_min=32, b_max=256)
+    assert lad[-1] >= 200 and len(lad) <= 8
+    assert all(b2 > b1 for b1, b2 in zip(lad, lad[1:]))
+    # near-even ladder expected for uniform load: max gap not absurdly larger than min
+    gaps = np.diff([0] + lad)
+    assert gaps.max() <= 4 * max(gaps.min(), 16)
+
+
+def test_bucketed_solver_routes_and_agrees():
+    import numpy as np, jax
+    from hitman.inference.seq import make_bucketed_mle, make_sequential_mle
+    from hitman.inference.compiled import CompiledMLEConfig
+    from hitman.nn import ChargeNet, HitNet
+    hitnet = HitNet(width=16, depth=2, key=jax.random.PRNGKey(0))
+    chargenet = ChargeNet(width=16, depth=2, key=jax.random.PRNGKey(1))
+    cfg = CompiledMLEConfig()
+    kw = dict(polish=2, lbfgs_maxiter=15)
+    solve = make_bucketed_mle(hitnet, chargenet, cfg, buckets=[48, 96], **kw)
+    rng = np.random.default_rng(2)
+    for n in (10, 60):
+        hits = np.concatenate([rng.normal(0, 400, (n, 3)),
+                               rng.normal(60, 15, (n, 1))], 1).astype(np.float32)
+        pmt = rng.integers(0, 200, n).astype(np.int32)
+        t = hits[:, 3].astype(np.float32)
+        charge = np.array([n, n], np.float32)
+        th_b = np.asarray(solve(hits, pmt, t, charge))
+        assert np.isfinite(th_b).all()
+        # reference: fixed-pad solver at the routed bucket must agree closely
+        b = 48 if n <= 48 else 96
+        hp = np.zeros((b, 4), np.float32); hp[:n] = hits
+        ip = np.zeros(b, np.int32); ip[:n] = pmt
+        tp = np.zeros(b, np.float32); tp[:n] = t
+        mp = np.zeros(b, np.float32); mp[:n] = 1.0
+        ref = make_sequential_mle(hitnet, chargenet, cfg, n_pad=b, **kw)
+        th_r = np.asarray(ref(hp, ip, tp, mp, charge))
+        np.testing.assert_allclose(th_b, th_r, atol=1e-4)
+    # lazy compile: only the used buckets exist; oversized event raises
+    import pytest
+    with pytest.raises(ValueError):
+        solve(np.zeros((200, 4), np.float32), np.zeros(200, np.int32),
+              np.zeros(200, np.float32), np.array([200, 200], np.float32))

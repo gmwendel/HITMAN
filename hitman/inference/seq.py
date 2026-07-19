@@ -662,3 +662,126 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
         return theta
 
     return solve
+
+
+# ---------------------------------------------------------------------------
+# Pad-bucket ladder: data-driven bucket choice + lazily-compiled routing
+# ---------------------------------------------------------------------------
+
+def choose_buckets(nhit_samples, *, max_buckets: int = 8, grid: int = 16,
+                   b_min: int = 32, b_max: int = 256, call_overhead_rows: float = 8.0):
+    """Choose a round-up pad-bucket ladder minimizing expected padded size.
+
+    The per-call cost is affine in the padded size B (measured: ~30 us fixed +
+    ~3.9 us/row for value+grad), so the optimal ladder minimizes E[B(n)] over the
+    workload's hit-count distribution — a 1-D quantization problem solved exactly
+    by dynamic programming over a candidate grid. ``call_overhead_rows`` expresses
+    the fixed per-call cost in row-equivalents (a/b), which penalizes gratuitous
+    tiny buckets; ``grid`` keeps boundaries on SIMD-friendly multiples.
+
+    Parameters
+    ----------
+    nhit_samples : array-like of int
+        Empirical hit counts of the intended workload (e.g. ``batch.charge[:, 1]``).
+    max_buckets : int
+        Compile-budget cap on the number of ladder rungs.
+
+    Returns
+    -------
+    list of int — ascending bucket sizes; the last is >= max(nhit_samples) capped
+    at ``b_max`` (events above ``b_max`` are the caller's problem, as with
+    ``pad_events``).
+    """
+    import numpy as _np
+
+    n = _np.asarray(nhit_samples).astype(int)
+    n = n[(n > 0) & (n <= b_max)]
+    top = int(min(b_max, max(int(n.max()), b_min)))
+    cands = list(range(b_min, ((top + grid - 1) // grid) * grid + 1, grid))
+    if not cands:
+        return [b_min]
+    counts = _np.array([(n <= c).sum() for c in cands], dtype=float)
+    total = counts[-1]
+    # DP: best[j][k] = min expected padded size using k buckets with largest = cands[j],
+    # covering all events with n <= cands[j].
+    C = len(cands)
+    INF = float("inf")
+    best = _np.full((C, max_buckets + 1), INF)
+    choice = _np.full((C, max_buckets + 1), -1, dtype=int)
+    eff = _np.array(cands, dtype=float) + call_overhead_rows
+    for j in range(C):
+        best[j][1] = eff[j] * counts[j]
+    for k in range(2, max_buckets + 1):
+        for j in range(C):
+            for i in range(j):
+                if best[i][k - 1] == INF:
+                    continue
+                v = best[i][k - 1] + eff[j] * (counts[j] - counts[i])
+                if v < best[j][k]:
+                    best[j][k] = v
+                    choice[j][k] = i
+    kbest = int(_np.argmin(best[C - 1][1:max_buckets + 1]) + 1)
+    ladder = [cands[C - 1]]
+    j, k = C - 1, kbest
+    while k > 1:
+        j = int(choice[j][k])
+        ladder.append(cands[j])
+        k -= 1
+    ladder = sorted(ladder)
+    return ladder
+
+
+def make_bucketed_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEConfig(),
+                      *, buckets=None, nhit_samples=None, **solver_kwargs) -> Callable:
+    """Bucket-routing wrapper over ``make_sequential_mle``: ragged event in, theta out.
+
+    Routes each event to the smallest ladder rung holding its hits and lazily builds
+    (and caches) one sequential solver per rung on first use — a workload that never
+    sees bright events never compiles the big buckets. Per-event numerics match the
+    fixed-pad solver up to masked-slot noise (the quad-seed slot sampling sees a
+    different pad length, so results agree in basin/likelihood, not bitwise).
+
+    Parameters
+    ----------
+    buckets : list of int, optional
+        Explicit ladder; otherwise derived from ``nhit_samples`` via ``choose_buckets``
+        (one of the two must be given).
+    solver_kwargs : passed through to ``make_sequential_mle`` (method, polish, ...).
+
+    Call signature of the returned solver:
+        solve(hits (n,4), pmt_id (n,), t (n,), charge (2,)) -> theta (7,)
+    with n the TRUE hit count (unpadded); raises ValueError if n exceeds the ladder.
+    """
+    import numpy as _np
+
+    if buckets is None:
+        if nhit_samples is None:
+            raise ValueError("give either buckets or nhit_samples")
+        buckets = choose_buckets(nhit_samples)
+    ladder = sorted(int(b) for b in buckets)
+    solvers = {}
+
+    def _solver_for(b):
+        if b not in solvers:
+            solvers[b] = make_sequential_mle(hitnet, chargenet, cfg, n_pad=b,
+                                             **solver_kwargs)
+        return solvers[b]
+
+    def solve(hits, pmt_id, t, charge):
+        n = int(_np.asarray(hits).shape[0])
+        idx = int(_np.searchsorted(ladder, n))
+        if idx >= len(ladder):
+            raise ValueError(f"event has {n} hits > largest bucket {ladder[-1]}")
+        b = ladder[idx]
+        hp = _np.zeros((b, 4), _np.float32)
+        hp[:n] = _np.asarray(hits)[:n]
+        ip = _np.zeros(b, _np.int32)
+        ip[:n] = _np.asarray(pmt_id)[:n]
+        tp = _np.zeros(b, _np.float32)
+        tp[:n] = _np.asarray(t)[:n]
+        mp = _np.zeros(b, _np.float32)
+        mp[:n] = 1.0
+        return _solver_for(b)(hp, ip, tp, mp, _np.asarray(charge, _np.float32))
+
+    solve.buckets = ladder
+    return solve
