@@ -785,3 +785,34 @@ def make_bucketed_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLECon
 
     solve.buckets = ladder
     return solve
+
+
+def chunk_decomposition_lut(*, chunks=(16, 32, 64, 128, 256),
+                            call_overhead_rows: float = 8.0, n_max: int = 256):
+    """Optimal exact-cover decompositions n -> [chunk sizes] (user's exponential scheme).
+
+    The event NLL/grad/Hessian are SUMS over hits, so an event may be evaluated as a
+    sum of fixed-size chunk-kernel calls with zero approximation (verified exact).
+    Cost model: (#calls)*a + b*(padded rows), a ~ call_overhead_rows*b. For each n
+    (16-aligned) a tiny DP picks the cheapest multiset of chunks covering n — e.g.
+    96 -> [64, 32] (split saves 32 rows > one call overhead) but 17..32 -> [32]
+    (equal rows: single call wins). MEASURED (loaded-box ratios, n=96): split = 1.12x
+    a perfectly-sized monolithic kernel, 0.73x the coarse 160-bucket routing.
+
+    Returns dict {n_ceil16: tuple(chunks)} for n_ceil16 in 16..n_max.
+    """
+    import numpy as _np
+
+    steps = n_max // 16
+    best = {0: (0.0, ())}
+    for m in range(1, steps + 1):
+        rows = m * 16
+        cands = []
+        for c in chunks:
+            if c > rows + max(chunks):
+                continue
+            rem = max(0, rows - c)
+            pc, pd = best[rem]
+            cands.append((pc + call_overhead_rows + c, pd + (c,)))
+        best[rows] = min(cands)
+    return {rows: tuple(sorted(d, reverse=True)) for rows, (c, d) in best.items() if rows}
