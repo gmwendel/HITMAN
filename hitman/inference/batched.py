@@ -1,5 +1,14 @@
 """Batched event inference: padded packing, multistart MLE, lockstep NUTS.
 
+DEPLOYMENT LANE — **GPU / lockstep-vmap throughput path.** ``batched_multistart_mle``
+and ``batched_nuts`` fit MANY events at once under a single vmap, so every lane runs
+in lockstep on fixed-length loops (one compile total, not one per hit count) and the
+chains are depth-capped (``max_doublings``) so the batch cannot stall on one deep
+tree. This is the right lane for offline survey/analysis throughput on the GPU. For
+the single-core CPU ratpac/Eos deployment use :mod:`hitman.inference.seq` instead
+(adaptive per-event work, no lockstep tax); for the exportable one-call graph use
+:mod:`hitman.inference.compiled`.
+
 This is the production inference path (audit finding 1): `multistart_mle` on ragged
 per-event hits compiles once per DISTINCT hit count (seconds each, hundreds of counts
 per survey), so every survey script re-implemented the same padded/masked pattern by

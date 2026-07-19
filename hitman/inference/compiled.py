@@ -1,5 +1,13 @@
 """Compiled single-event MLE solver: one jitted graph, deployment-target CPU.
 
+DEPLOYMENT LANE — **fully-jitted exportable graph (StableHLO / cppflow).** The
+seeder AND the whole optimization loop live inside ONE jitted function, so the
+graph can be lowered to StableHLO / a TF SavedModel and called once per event from
+the C++ proc. Fixed-length loops and vmapped seeds are deliberate here: an exported
+graph has no Python driver, so control flow must be static. Trade the per-event
+adaptivity of :mod:`hitman.inference.seq` (the non-exported CPU driver) for
+exportability; use :mod:`hitman.inference.batched` for GPU batch throughput.
+
 This is the C++/cppflow deployment artifact (design decision #1 of the JAX
 modernization): a SINGLE compiled function that fuses the trained surrogate
 networks, a deterministic data-driven seeder, and the whole optimization loop, so

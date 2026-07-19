@@ -1,5 +1,15 @@
 """Sequential single-event MLE driver: small jitted primitives, a Python-level loop.
 
+DEPLOYMENT LANE — **single-core sequential CPU deployment path (the ratpac/Eos
+target).** A Python driver loops one event at a time over jitted primitives (hit
+embedding, gauge-penalized NLL value+grad, exact Hessian, HVP), driven by a real
+adaptive optimizer (SciPy ``L-BFGS-B`` with a genuine line search) and an
+exact-Hessian Newton polish, with bucket/chunk routing to keep recompiles bounded
+across variable hit counts. This is the lane the C++ event loop runs (single
+thread, one event at a time). Its GPU-throughput sibling is
+:mod:`hitman.inference.batched` (lockstep-vmap many events at once); its single
+fully-jitted exportable graph is :mod:`hitman.inference.compiled`.
+
 Companion to :func:`hitman.inference.compiled.make_compiled_mle`. That solver fuses the
 whole optimizer into ONE jitted graph (fixed-length loops, vmapped seeds) because it was
 shaped for a GPU / for a single exported cppflow graph. On the actual **single-core CPU
