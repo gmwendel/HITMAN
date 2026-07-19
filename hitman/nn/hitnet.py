@@ -23,8 +23,9 @@ from hitman.nn.mlp import MLP
 class HitNet(eqx.Module):
     mlp: MLP
 
-    def __init__(self, width: int = 256, depth: int = 3, *, key):
-        self.mlp = MLP(ft.N_HIT_FEATURES, width, depth, key=key)
+    def __init__(self, width: int = 256, depth: int = 3, *, key,
+                 activation: str = "mish"):
+        self.mlp = MLP(ft.N_HIT_FEATURES, width, depth, key=key, activation=activation)
 
     def __call__(self, hit: jnp.ndarray, hyp: jnp.ndarray) -> jnp.ndarray:
         """(hit (4,), hyp (7,)) -> scalar logit = log r_hit."""

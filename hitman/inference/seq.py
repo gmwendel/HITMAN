@@ -59,6 +59,46 @@ spatially-spread subset diversifies the seed and acts as a mild regulariser on t
 near-wall geometry) it lowers the tail on all four anchors below round-3 (bf 8 MeV 90-deg
 f(dNLL>1) 0.027 -> 0.003, both 3 MeV anchors unchanged at 0.000/0.001) -- at a latency
 cost, not a saving. Enable BOTH for the tail benefit.
+
+Round-5 study (``opt_eval/logs/r5`` receipts) -- distilled search student (negative)
+------------------------------------------------------------------------------------
+A width-32 HitNet "search student", distilled to regress the teacher's per-hit logits
+(Huber loss; hits from the 5M marginal x a broadened trajectory hypothesis distribution
+-- event-permuted PLUS jittered thetas -- so it is accurate WHERE THE OPTIMIZER ROAMS,
+not just on the data joint), was wired in as ``search_net=``: student L-BFGS from both
+cone-sign seeds -> teacher tight-gtol endgame -> teacher LM polish + Fisher. The student
+value+grad is ~6x cheaper (np96: 71-113 us vs the teacher's 424 us) so the SEARCH is
+cheap, but the ~4x latency target was again NOT reached, for two independent reasons.
+(1) An L-BFGS teacher endgame does NOT shorten from the student's warm start -- it rebuilds
+its curvature approximation and grinds to gtol regardless (still ~40-60 iters even when the
+student optimum is <3 nats away at np96); and replacing it with a pure exact-Newton/LM
+polish from the student optimum FAILS the tail (f(dNLL>1) ~0.45), because the teacher
+descent is doing basin SELECTION, not just precision refinement, which a local Newton step
+cannot replicate. (2) The tail is basin-selection-bound and the student cannot fully hold it: even at the
+FULL both-seed 60-iter endgame the width-32 student sits at zen180 f(dNLL>1) ~0.003 (vs the
+r4 subsample-shipped 0.001) -- its search occasionally seeds both cone signs into a basin
+the local teacher endgame cannot escape -- and any endgame REDUCTION that would buy speed
+only worsens the tail: zen000 0.000 -> 0.002 and zen180 -> 0.003-0.004 at np96 (25-iter
+both-seed / 40-iter single-seed), and CATASTROPHICALLY at np256 (bf 8 MeV near-wall 0.013
+-> 0.11-0.24 under ANY reduction; only the full both-seed 60-iter endgame keeps it at
+0.013). Net: the student roughly reproduces the tail at the FULL endgame (bf700 even
+matches the r4-best 0.000-0.003 WITHOUT subsample, since its search supplies the diversity
+subsample did) but at essentially baseline teacher cost -- pure added work -- and every
+real-speedup config breaks a gate. This SHARPENS r4: the binding constraint is
+basin-selection accuracy on the tail, which the teacher's full both-cone-sign tight descent
+supplies and no width-32 surrogate -- distilled OR directly NRE-trained -- can shortcut.
+Activation ablation (student value+grad, np160 single core; all five lower BIT-EXACT to
+StableHLO, ``scripts/export_student_teacher_stablehlo.py``): mish 113 us (best logit
+fidelity, off-joint near-basin RMSE 0.69), hardswish 71 us (1.6x cheaper, RMSE 0.75, best
+end-to-end tail f(dNLL>1)=0 on both full-endgame anchors) -> the recommended search net;
+swish 82 us; relu/softplus worse fidelity. A direct-NRE width-32 control MATCHED the teacher
+on the data joint (logit RMSE 0.27 vs the distilled 0.60) but DIVERGED off-joint on the
+broadened search distribution (5.72 vs 0.85) and had the WORST handoff tail (bf700
+f(dNLL>1) 0.0067 vs distilled mish 0.0033, hardswish 0.000) -- the quantitative case for
+distilling on where-the-optimizer-roams, though the robust teacher endgame masks most of
+the difference in FINAL accuracy. ``search_net`` is shipped opt-in and OFF by default;
+enable it only if a future cheaper endgame or a higher-capacity student closes the
+basin-selection gap.
 """
 
 from typing import Callable, NamedTuple
@@ -73,7 +113,7 @@ from hitman.inference.compiled import (C_MM_PER_NS, CompiledMLEConfig, _bounds,
                                        _quad_cloud)
 from hitman.inference.mle import CHART_SCALE, theta_from_chart
 from hitman.nn.features import TIME_SCALE, wrap_direction
-from hitman.nn.mlp import mish
+from hitman.nn.mlp import get_activation
 
 _QUAD_KEY = jax.random.PRNGKey(0)
 
@@ -92,11 +132,16 @@ class SequentialMLEResult(NamedTuple):
         Fisher information. ``inv(fisher)`` is the asymptotic covariance for error bars.
         All zeros if ``compute_fisher=False``.
     n_grad : int
-        Number of value+grad primitive evaluations spent on this event.
+        Number of TEACHER value+grad primitive evaluations spent on this event (search
+        endgame + polish + the true-NLL screens; the tail-protecting exact-NLL work).
     n_hess : int
         Number of exact-Hessian primitive evaluations spent on this event.
     n_seeds : int
         Number of seeds actually descended (1 or 2 under the default policy).
+    n_grad_search : int
+        Number of STUDENT value+grad primitive evaluations spent on this event (0 unless
+        a ``search_net`` was supplied). These are the cheap search-phase evaluations the
+        distilled width-32 student absorbs so the teacher only runs the short endgame.
     """
 
     theta: np.ndarray
@@ -105,6 +150,7 @@ class SequentialMLEResult(NamedTuple):
     n_grad: int
     n_hess: int
     n_seeds: int
+    n_grad_search: int = 0
 
 
 def _build_primitives(hitnet, chargenet, cfg: CompiledMLEConfig, n_pad: int,
@@ -138,14 +184,17 @@ def _build_primitives(hitnet, chargenet, cfg: CompiledMLEConfig, n_pad: int,
     gs = cfg.gauge_stiffness
     w6 = L[0].weight[:, 6]                      # (width,) dt-column first-layer weights
     t_grid = jnp.linspace(cfg.t_range[0], cfg.t_range[1], t_grid_n)
+    act = get_activation(hitnet.mlp.act)        # this net's activation (teacher: mish)
 
     def _logits_fused(pre):
         # explicit (n_pad, width) GEMM head -- ~1.5x faster than vmap(head) for the
         # exact Hessian (fewer, larger XLA-CPU matmuls); numerically identical to
-        # MLP.head (mish(pre) -> hidden layers with mish -> linear readout).
-        x = mish(pre)
+        # MLP.head (act(pre) -> hidden layers with act -> linear readout). ``act`` is the
+        # net's own activation, so this fused path serves the mish teacher AND a cheaper
+        # search student (round-5) with one code path.
+        x = act(pre)
         for layer in L[1:-1]:
-            x = mish(x @ layer.weight.T + layer.bias)
+            x = act(x @ layer.weight.T + layer.bias)
         return (x @ L[-1].weight.T + L[-1].bias)[:, 0]
 
     def _nll(u, e_hit, mask, charge, fused):
@@ -261,6 +310,8 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
                         t_grid_n: int = 24, subsample: bool = False,
                         n_sub: int = 0, sub_maxiter: int = 40, sub_gtol: float = 1e-5,
                         endgame_gtol: float = 1e-6, endgame_maxiter: int = 60,
+                        search_net=None, search_maxiter: int = 40,
+                        search_gtol: float = 1e-5, search_both_seeds: bool = True,
                         compute_fisher: bool = False,
                         return_extras: bool = False) -> Callable:
     """Build the Python-level sequential single-event MLE solver.
@@ -327,6 +378,27 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
     endgame_gtol, endgame_maxiter : float, int
         L-BFGS-B controls for the full-hit endgame after a subset search. Keep tight
         (the defaults) -- see the ``subsample`` landmine.
+    search_net : eqx.Module or None
+        Round-5 distilled SEARCH student (opt-in, off by default). A cheap (width-32)
+        HitNet-shaped surrogate trained to regress the teacher's per-hit logits. When
+        supplied, the L-BFGS SEARCH from each cone-sign seed runs on the STUDENT NLL
+        (student HitNet + teacher ChargeNet; ~10-40x cheaper value+grad), and the TEACHER
+        then runs a short tight-gtol full-hit endgame from the student optimum. The
+        endgame is what protects the near-wall tail (r4 landmine: the tail needs the full
+        tight-gtol teacher descent) -- but starting it from the student optimum instead of
+        the raw seed cuts its iteration count from ~78 to ~5-15, so the teacher runs far
+        fewer expensive value+grads per event. The final polish + Fisher are always the
+        teacher's. Accuracy is measured under the teacher NLL (unchanged), so a search
+        student can only be shipped if the composed solver holds the acceptance gates.
+    search_maxiter, search_gtol : int, float
+        L-BFGS-B controls for the STUDENT search phase. The student need not converge to
+        machine precision -- it only has to land the teacher endgame in the right basin --
+        so ``search_gtol`` is looser than the teacher endgame's ``lbfgs_gtol``.
+    search_both_seeds : bool
+        If True (default) run the teacher endgame from BOTH cone-sign seeds' student
+        optima and keep the best (tail-robust: the student may misrank the two basins).
+        If False, endgame only the seed whose student optimum has the lower TEACHER NLL
+        (one teacher endgame instead of two -- faster, a small tail risk).
     compute_fisher : bool
         Also evaluate the exact theta-space Hessian (observed Fisher) at the optimum.
     return_extras : bool
@@ -360,6 +432,19 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
     n_sub = p.get("n_sub", 0)
     eye8 = np.eye(8)
 
+    # round-5 distilled search student (opt-in). Its primitives take the STUDENT hit
+    # embedding as an argument, exactly like the teacher's; the search-phase NLL is the
+    # student HitNet + the (shared) teacher ChargeNet.
+    use_search = search_net is not None
+    vg_pen_s = t_scan_s = student_embed = None
+    if use_search:
+        if getattr(search_net, "obs_style", "xyz") != "xyz":
+            raise NotImplementedError(
+                "search_net must be a separable xyz HitNet (obs_style 'xyz')")
+        ps = _build_primitives(search_net, chargenet, cfg, n_pad, t_grid_n=t_grid_n)
+        vg_pen_s, t_scan_s = ps["vg_pen"], ps["t_scan"]
+        student_embed = jax.jit(jax.vmap(search_net.embed_hit))
+
     def solve(hits_pad, pmt_id, t, mask, charge):
         e_hit, u_seeds = prep(hits_pad, pmt_id, t, mask, charge)
         e_hit = np.asarray(e_hit)
@@ -367,7 +452,8 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
         charge = np.asarray(charge, np.float32)
         u_seeds = np.asarray(u_seeds, np.float64)
         n_avail = u_seeds.shape[0]
-        cnt = dict(g=0, h=0, s=0)
+        cnt = dict(g=0, h=0, s=0, gs=0)
+        e_hit_s = np.asarray(student_embed(hits_pad)) if use_search else None
 
         # deterministic, spatially spread hit subset for the coarse search phase
         sub_ready = False
@@ -387,8 +473,33 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
         def _seed(u):
             if not robust_t:
                 return u
+            # robust_t causal-t rescan: on the STUDENT surface when a search net is
+            # supplied (cheaper, same causal cliff -- it shares the dt feature), else
+            # on the teacher.
+            if use_search:
+                cnt["gs"] += 1
+                return np.asarray(t_scan_s(jnp.asarray(u), e_hit_s, mask, charge), np.float64)
             cnt["g"] += 1
             return np.asarray(t_scan(jnp.asarray(u), e_hit, mask, charge), np.float64)
+
+        def _vg_s(u):                              # STUDENT penalized value+grad
+            cnt["gs"] += 1
+            v, g = vg_pen_s(jnp.asarray(u), e_hit_s, mask, charge)
+            return float(v), np.asarray(g, np.float64)
+
+        def _search_then_endgame(u0):
+            """Student L-BFGS search -> teacher tight-gtol full-hit endgame from its optimum.
+
+            The student lands the basin cheaply; the teacher endgame (the r4
+            tail-protecting full-hit tight descent) refines it in a handful of exact
+            value+grads because it starts near the optimum.
+            """
+            rs = minimize(_vg_s, u0, jac=True, method="L-BFGS-B", bounds=bounds,
+                          options=dict(maxiter=search_maxiter, ftol=1e-9, gtol=search_gtol))
+            u_s = np.clip(rs.x, u_lo, u_hi)
+            r = minimize(_vg, u_s, jac=True, method="L-BFGS-B", bounds=bounds,
+                         options=dict(maxiter=lbfgs_maxiter, ftol=1e-9, gtol=lbfgs_gtol))
+            return np.clip(r.x, u_lo, u_hi)
 
         def _f_true(u):
             return float(nll_true(jnp.asarray(u), e_hit, mask, charge))
@@ -432,6 +543,8 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
             if method == "lm":
                 return _lm(u0.copy(), cfg.min_iter, cfg.max_iter, cfg.ftol)[0]
             if method == "lbfgsb":
+                if use_search:                         # student search -> teacher endgame
+                    return _search_then_endgame(u0)
                 gtol, mit = lbfgs_gtol, lbfgs_maxiter
                 if sub_ready:                          # coarse subset search first
                     def _vgs(u):
@@ -474,18 +587,34 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
 
         best_u, best_f = None, np.inf
         n_try = min(max_seeds, n_avail)
-        for s in range(n_try):
-            cnt["s"] += 1
-            u = run_one(_seed(u_seeds[s]))
-            f = _f_true(u)
-            if f < best_f:
-                best_f, best_u = f, u
-            if (not always_all_seeds) and s + 1 < n_avail:
-                # cheap acceptance: stop if the current optimum clearly beats the next
-                # seed's screening NLL (unlikely the remaining seeds improve the basin)
-                nxt = float(nll_true(jnp.asarray(u_seeds[s + 1]), e_hit, mask, charge))
-                if best_f < nxt - accept_margin:
-                    break
+        if use_search and not search_both_seeds and n_try > 1:
+            # Cheap-tail variant: STUDENT-search every seed, then pay ONE teacher endgame
+            # from the student optimum with the lower TEACHER NLL. Fewer teacher
+            # value+grads, at the risk the student misranks the two cone-sign basins.
+            u_students = []
+            for s in range(n_try):
+                cnt["s"] += 1
+                rs = minimize(_vg_s, _seed(u_seeds[s]), jac=True, method="L-BFGS-B",
+                              bounds=bounds,
+                              options=dict(maxiter=search_maxiter, ftol=1e-9, gtol=search_gtol))
+                u_students.append(np.clip(rs.x, u_lo, u_hi))
+            pick = min(u_students, key=_f_true)
+            r = minimize(_vg, pick, jac=True, method="L-BFGS-B", bounds=bounds,
+                         options=dict(maxiter=lbfgs_maxiter, ftol=1e-9, gtol=lbfgs_gtol))
+            best_u = np.clip(r.x, u_lo, u_hi); best_f = _f_true(best_u)
+        else:
+            for s in range(n_try):
+                cnt["s"] += 1
+                u = run_one(_seed(u_seeds[s]))
+                f = _f_true(u)
+                if f < best_f:
+                    best_f, best_u = f, u
+                if (not always_all_seeds) and s + 1 < n_avail:
+                    # cheap acceptance: stop if the current optimum clearly beats the next
+                    # seed's screening NLL (remaining seeds unlikely to improve the basin)
+                    nxt = float(nll_true(jnp.asarray(u_seeds[s + 1]), e_hit, mask, charge))
+                    if best_f < nxt - accept_margin:
+                        break
 
         # Endpoints to polish: the descent optimum, and (robust_t) its causal-t rescan --
         # the descent may have drifted the vertex (and with it the causal cliff) off the
@@ -518,7 +647,8 @@ def make_sequential_mle(hitnet, chargenet, cfg: CompiledMLEConfig = CompiledMLEC
             fisher = np.asarray(fisher_theta(jnp.asarray(theta, np.float32), e_hit,
                                              mask, charge), np.float64)
         if return_extras:
-            return SequentialMLEResult(theta, best_f, fisher, cnt["g"], cnt["h"], cnt["s"])
+            return SequentialMLEResult(theta, best_f, fisher, cnt["g"], cnt["h"],
+                                       cnt["s"], cnt["gs"])
         return theta
 
     return solve

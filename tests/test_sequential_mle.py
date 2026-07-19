@@ -225,5 +225,99 @@ def test_robust_t_still_bounded_and_deterministic():
     assert np.all((th[:, 5] >= -10.0 - 1e-3) & (th[:, 5] <= 10.0 + 1e-3))
 
 
+def _toy_student(key, activation="hardswish", width=32, depth=3):
+    """A width-32 HitNet-shaped search student with a configurable activation."""
+    return HitNet(width=width, depth=depth, key=key, activation=activation)
+
+
+@pytest.mark.parametrize("activation", ["mish", "swish", "softplus", "relu", "hardswish"])
+def test_search_net_matches_teacher_only(activation):
+    """The student-search + teacher-endgame path reaches an NLL competitive with the
+    teacher-only path (the teacher endgame + polish protect accuracy) for every
+    activation, stays bounded, and never returns NaN."""
+    hitnet, chargenet = _toy_nets(jax.random.PRNGKey(30))
+    student = _toy_student(jax.random.PRNGKey(31), activation)
+    padded = _toy_events(jax.random.PRNGKey(32), n_events=8, n_pad=32)
+    cfg = CompiledMLEConfig()
+    base = make_sequential_mle(hitnet, chargenet, cfg, n_pad=32)
+    srch = make_sequential_mle(hitnet, chargenet, cfg, n_pad=32, search_net=student)
+    args = [(padded.hits[i], padded.pmt_id[i], padded.t[i], padded.mask[i],
+             padded.charge[i]) for i in range(8)]
+    th_b = np.stack([base(*a) for a in args])
+    th_s = np.stack([srch(*a) for a in args])
+    dnll = _nll_batch(hitnet, chargenet, th_s, padded) - \
+        _nll_batch(hitnet, chargenet, th_b, padded)
+    # teacher endgame protects the optimum: student path is no worse than a small margin
+    assert np.median(dnll) < 0.1, f"{activation}: median dNLL {np.median(dnll):.3f}"
+    assert np.percentile(dnll, 90) < 0.5
+    assert np.all(np.isfinite(th_s))
+    assert np.all(np.abs(th_s[:, :3]) <= 800.0 + 1e-3)
+
+
+def test_search_net_counts_split_by_net():
+    """return_extras reports student value+grads separately (n_grad_search) from the
+    teacher's (n_grad); both are spent when a search net is supplied."""
+    hitnet, chargenet = _toy_nets(jax.random.PRNGKey(33))
+    student = _toy_student(jax.random.PRNGKey(34))
+    padded = _toy_events(jax.random.PRNGKey(35), n_events=4, n_pad=32)
+    solve = make_sequential_mle(hitnet, chargenet, CompiledMLEConfig(), n_pad=32,
+                                search_net=student, return_extras=True)
+    r = solve(padded.hits[0], padded.pmt_id[0], padded.t[0], padded.mask[0],
+              padded.charge[0])
+    assert isinstance(r, SequentialMLEResult)
+    assert r.n_grad_search > 0 and r.n_grad > 0
+    # teacher-only path spends zero student grads
+    base = make_sequential_mle(hitnet, chargenet, CompiledMLEConfig(), n_pad=32,
+                               return_extras=True)
+    rb = base(padded.hits[0], padded.pmt_id[0], padded.t[0], padded.mask[0],
+              padded.charge[0])
+    assert rb.n_grad_search == 0
+
+
+def test_search_net_both_and_one_seed_bounded_deterministic():
+    """search_both_seeds True/False both stay in the box and are byte-deterministic."""
+    hitnet, chargenet = _toy_nets(jax.random.PRNGKey(36))
+    student = _toy_student(jax.random.PRNGKey(37))
+    padded = _toy_events(jax.random.PRNGKey(38), n_events=4, n_pad=32)
+    cfg = CompiledMLEConfig(radius=800.0, half_height=800.0)
+    for both in (True, False):
+        solve = make_sequential_mle(hitnet, chargenet, cfg, n_pad=32, search_net=student,
+                                    search_both_seeds=both, robust_t=True)
+        args = (padded.hits[0], padded.pmt_id[0], padded.t[0], padded.mask[0],
+                padded.charge[0])
+        a, b = solve(*args), solve(*args)
+        assert np.array_equal(a, b), f"both={both} not deterministic"
+        th = np.stack([solve(padded.hits[i], padded.pmt_id[i], padded.t[i],
+                             padded.mask[i], padded.charge[i]) for i in range(4)])
+        assert np.all(np.abs(th[:, :3]) <= 800.0 + 1e-3)
+        assert np.all(np.isfinite(th))
+
+
+def test_mlp_activation_static_and_backcompat():
+    """The activation is a static field: a default-mish template deserialises weights
+    from any width net unchanged, and each named activation round-trips through the
+    separable embed path exactly (no activation on the linear first-layer embed)."""
+    from hitman.nn.mlp import ACTIVATIONS, get_activation
+    import equinox as eqx
+    key = jax.random.PRNGKey(40)
+    net = _toy_student(key, "swish", width=16, depth=2)
+    blob = "/tmp/_r5_actnet.eqx"
+    eqx.tree_serialise_leaves(blob, net)
+    # deserialising into a template built with the SAME activation restores weights
+    tmpl = _toy_student(key, "swish", width=16, depth=2)
+    net2 = eqx.tree_deserialise_leaves(blob, tmpl)
+    hit = jnp.array([100.0, -50.0, 20.0, 5.0]); hyp = jnp.array([1., 2., 3., 1., .5, 0., 2.])
+    assert float(net(hit, hyp)) == float(net2(hit, hyp))
+    # separable embed path equals the direct call for every activation
+    for a in ACTIVATIONS:
+        n = _toy_student(key, a, width=16, depth=2)
+        direct = float(n(hit, hyp))
+        sep = float(n.logit_from_embedding(n.embed_hit(hit) + n.embed_hyp(hyp)))
+        assert abs(direct - sep) < 1e-4, f"{a}: embed path {sep} != direct {direct}"
+    assert get_activation("mish") is not None
+    with pytest.raises(ValueError):
+        get_activation("not_an_activation")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
