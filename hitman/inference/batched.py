@@ -180,12 +180,18 @@ def batched_nuts(hitnet, chargenet, padded: PaddedEvents, mle: MLEResult, *, key
                  cfg: MLEConfig = MLEConfig(), n_steps: int = 700, n_burn: int = 200,
                  n_chains: int = 8, gauge_stiffness: float = 50.0,
                  prior_stiffness: float = 1e2, rhat_coord: int = 2,
-                 chunk: int = 100) -> BatchedNUTSResult:
+                 chunk: int = 100, max_doublings: int = 10) -> BatchedNUTSResult:
     """Lockstep multi-chain NUTS for every packed event, seeded from the MLE minima.
 
     Chains sample in chart space with the |d| gauge term (the NLL is invariant to the
     direction norm — an improper flat mode that breaks HMC without it) and a smooth
     box prior matching the MLE bounds.
+
+    ``max_doublings`` caps the NUTS tree depth. In LOCKSTEP vmapped chains every
+    lane pays the deepest tree in the batch each draw (measured: mean 8.4
+    leapfrogs/draw, batch max 55 — a 4-6x padding waste at the blackjax default
+    of 10 doublings). A cap of ~5 (32 leapfrogs) covers the p99 tree at our
+    geometry; verify with R-hat/divergence receipts whenever changing it.
     """
     nll = make_padded_nll(hitnet, chargenet)
     u_lo, u_hi = _bounds(cfg)
@@ -201,11 +207,14 @@ def batched_nuts(hitnet, chargenet, padded: PaddedEvents, mle: MLEResult, *, key
     ev0 = (padded.hits[0], padded.pmt_id[0], padded.t[0], padded.mask[0], padded.charge[0])
     key, akey = jax.random.split(key)
     adapt = blackjax.window_adaptation(blackjax.nuts, make_logd(ev0),
-                                       target_acceptance_rate=0.8)
+                                       target_acceptance_rate=0.8,
+                                       max_num_doublings=max_doublings)
     (_, params), _ = adapt.run(akey, mle.chart_minima[0, 0], num_steps=400)
 
     def sample_event(ev, u0s, k):
         def one_chain(u0, ck):
+            # params already carries max_num_doublings (window_adaptation forwards
+            # extra kwargs into its returned parameters dict)
             kernel = blackjax.nuts(make_logd(ev), **params)
             state = kernel.init(u0)
 
