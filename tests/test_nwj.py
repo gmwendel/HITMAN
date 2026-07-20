@@ -1,92 +1,83 @@
-"""NWJ objective: stationarity at the true ratio, the two-expectation restoring force,
-and per-stratum bound-gap calibration.
+"""Exact-quadrature tilted-family MLE (hitman.train.nwj).
 
-Toy (adapted from tests/test_identities.py): per event, truth theta has t0 ~ N(0, 30)
-(slot 5) and E ~ U(0.5, 9.5) (slot 6); each hit carries time t ~ N(t0, s_t) in h[3] and
-a proxy x ~ N(E, 1) in h[0]. Both exact marginals are analytic, so ``ExactNet``'s logit
-IS the true per-hit log ratio log p(x|theta)/p(x); its normalizer Z(theta) = 1 (log Z =
-0). ``TiltedNet(eps)`` adds a coherent ``eps * theta_E`` per hit — a pure theta-dependent
-shift, i.e. exactly the kind of drift the NWJ normalizer a_psi(theta) is meant to absorb.
-
-Unlike test_identities (event-grouped padded batches for the score penalty), NWJ works on
-flat per-hit (obs, theta) pairs: matched = aligned rows, shuffled = a marginal
-permutation, exactly as hit_batch/_batch_loss feed the trainer.
+Toy (per-hit, adapted from tests/test_identities.py): truth theta has t0 ~ N(0,30) in
+slot 5 and E ~ U(0.5,9.5) in slot 6; each hit carries t ~ N(t0, S_T) in h[3] and a proxy
+x ~ N(E, S_X) in h[0]. Both exact marginals are analytic, so ``ExactNet``'s logit IS the
+true per-hit log ratio log p(x|theta)/p_marg(x) with partition Z(theta) == 1. The toy
+observation grid (x, t) with its analytic marginal pmf gives an EXACT log Z by quadrature,
+mirroring the production sensor x time grid — so the MLE loss is checked against first
+principles with no Monte-Carlo estimator anywhere.
 """
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
-import pytest
 from jax.scipy.stats import norm
 
-from hitman.train.nwj import (CLIP_C, N_STRATA, ZNet, nwj_hit_loss, soft_exp)
+from hitman.nn import HitNet
+from hitman.train.nwj import (build_hit_grid, grid_logZ, hit_logZ_targets, mle_hit_loss)
 
-# Time/charge resolutions are deliberately broad relative to the t0 spread and E range:
-# the per-hit ratio e^f is then light-tailed, so at the calibrated optimum e^{f-a} on
-# mismatched pairs stays well under the winsorization clip (100) — the regime the clip
-# assumes. A very peaked ratio (tiny S_T/S_X) makes e^f lognormal-heavy and E[e^f]=1
-# relies on rare mass beyond the clip, a toy pathology real detectors don't have.
 S_T, SIG_T0, S_X = 10.0, 30.0, 2.0
 S_MARG = float(np.sqrt(S_T**2 + SIG_T0**2))
 E_LO, E_HI = 0.5, 9.5
 N_HIT = 8
-# Winsorization off for the exact-ratio stationarity/identity checks: the EXACT ratio's
-# e^{f} has a heavy right tail (tight time resolution => peak r can exceed 100), so the
-# default clip is occasionally active AT the exact ratio and would bias the stationarity
-# gradient. The clip is a finite-sample tail guard, not part of the population identity.
-BIG = float(np.log(1e12))
 
 
 class ExactNet(eqx.Module):
-    """The true per-hit log ratio (Z == 1). eqx.Module so it is a valid loss argument."""
+    """The true per-hit log ratio (Z == 1)."""
 
     def __call__(self, h, th):
         lr_t = norm.logpdf(h[3], th[5], S_T) - norm.logpdf(h[3], 0.0, S_MARG)
         marg_x = (norm.cdf((h[0] - E_LO) / S_X) - norm.cdf((h[0] - E_HI) / S_X)) / (E_HI - E_LO)
-        lr_x = norm.logpdf(h[0], th[6], S_X) - jnp.log(marg_x)
-        return lr_t + lr_x
+        return lr_t + norm.logpdf(h[0], th[6], S_X) - jnp.log(marg_x)
 
 
 class ScaledNet(eqx.Module):
-    """c * (ExactNet + eps * theta_E): scale knob c on a possibly-tilted critic."""
+    """c * ExactNet: the f-contrast scale knob (c dynamic leaf, differentiable)."""
 
     c: jnp.ndarray
-    eps: float = eqx.field(static=True, default=0.0)
 
     def __call__(self, h, th):
-        return self.c * (ExactNet()(h, th) + self.eps * th[6])
+        return self.c * ExactNet()(h, th)
 
 
-class TiltGradNet(eqx.Module):
-    """ExactNet + eps * theta_E with eps a DYNAMIC leaf, so d/d(eps) is well defined."""
+class TiltXNet(eqx.Module):
+    """ExactNet + delta * x: a coherent tilt along the observable x = h[0] (delta a leaf)."""
 
-    eps: jnp.ndarray
+    delta: jnp.ndarray
 
     def __call__(self, h, th):
-        return ExactNet()(h, th) + self.eps * th[6]
+        return ExactNet()(h, th) + self.delta * h[0]
 
 
-class ConstZ(eqx.Module):
-    """Normalizer a_psi(theta) = coeff * theta_E (+ base). coeff=eps calibrates a
-    TiltedNet(eps) (log Z = eps*theta_E); coeff=0, base=0 is a == 0 (log Z of ExactNet).
-    """
+class ScaledTiltNet(eqx.Module):
+    """c * (ExactNet + delta * x) with c, delta static — for the deflation scan."""
 
-    coeff: float = eqx.field(static=True, default=0.0)
-    base: float = eqx.field(static=True, default=0.0)
+    c: float = eqx.field(static=True)
+    delta: float = eqx.field(static=True)
 
-    def a_hit(self, th):
-        return self.coeff * th[6] + self.base
+    def __call__(self, h, th):
+        return self.c * (ExactNet()(h, th) + self.delta * h[0])
 
-    def a_charge(self, th):
-        return 0.0 * th[0]
+
+def build_toy_grid(nx=140, nt=140):
+    """(x, t) quadrature grid with the analytic marginal pmf p_marg(x)*N(t;0,S_MARG),
+    empty cells dropped. Returns (grid_obs (G,4), grid_logp (G,))."""
+    xs = np.linspace(E_LO - 5 * S_X, E_HI + 5 * S_X, nx)
+    ts = np.linspace(-4 * S_MARG, 4 * S_MARG, nt)
+    px = (norm.cdf((xs - E_LO) / S_X) - norm.cdf((xs - E_HI) / S_X)) / (E_HI - E_LO)
+    pt = np.exp(-ts**2 / (2 * S_MARG**2)) / (S_MARG * np.sqrt(2 * np.pi))
+    P = np.asarray(px)[:, None] * np.asarray(pt)[None, :]
+    P /= P.sum()
+    X, T = np.meshgrid(xs, ts, indexing="ij")
+    obs = np.stack([X.ravel(), 0 * X.ravel(), 0 * X.ravel(), T.ravel()], 1).astype(np.float32)
+    keep = P.ravel() > 0
+    return jnp.asarray(obs[keep]), jnp.asarray(np.log(P.ravel()[keep]).astype(np.float32))
 
 
 def gen_hit_batch(key, n_events, n_hit=N_HIT):
-    """Flat per-hit (obs (M,4), theta (M,7)) with M = n_events*n_hit; row i's theta is its
-    generating event's theta (matched); the marginal permutation inside nwj_hit_loss makes
-    the shuffled pairs."""
+    """Flat per-hit (obs (M,4), theta (M,7)) with M = n_events*n_hit (matched pairs)."""
     k1, k2, k3, k4 = jax.random.split(key, 4)
     t0 = SIG_T0 * jax.random.normal(k1, (n_events,))
     e = jax.random.uniform(k2, (n_events,), minval=E_LO, maxval=E_HI)
@@ -94,230 +85,132 @@ def gen_hit_batch(key, n_events, n_hit=N_HIT):
     t = t0[:, None] + S_T * jax.random.normal(k3, (n_events, n_hit))
     x = e[:, None] + S_X * jax.random.normal(k4, (n_events, n_hit))
     obs = jnp.stack([x, jnp.zeros_like(x), jnp.zeros_like(x), t], axis=-1).reshape(-1, 4)
-    hyp = jnp.repeat(theta, n_hit, axis=0)
-    return obs, hyp
+    return obs, jnp.repeat(theta, n_hit, axis=0)
+
+
+GO, GP = build_toy_grid()
+
+
+def _subsample(theta, n, seed):
+    return theta[jax.random.randint(jax.random.PRNGKey(seed), (n,), 0, theta.shape[0])]
 
 
 # ---------------------------------------------------------------------------
-# Test 1: exact-ratio toy
+# Test 1: exact-ratio toy — MLE gradient vanishes at the true ratio (exact partition)
 # ---------------------------------------------------------------------------
 
-def test_exact_ratio_stationary_and_znet_learns_logZ():
-    """At f = exact ratio and a == 0 (= log Z), dL/d(scale) vanishes; and a flexible
-    a_psi trained from a wrong init converges toward log Z = 0."""
-    # (a) stationarity: gradient of L wrt the critic scale c at c=1, a=0.
-    zero = ConstZ()
+def test_exact_ratio_mle_stationary():
+    """log Z of the true ratio is 0 on the exact grid, and the MLE gradient in the
+    f-scale direction vanishes at the true ratio (with the EXACT toy partition)."""
+    thetas = gen_hit_batch(jax.random.PRNGKey(9), 2000)[1]
+    logZ = grid_logZ(ExactNet(), _subsample(thetas, 256, 0), GO, GP, chunk=32)
+    assert float(jnp.max(jnp.abs(logZ))) < 5e-3, f"log Z(exact) != 0: {float(jnp.max(jnp.abs(logZ)))}"
 
-    def L_scale(c, batch, key):
-        return nwj_hit_loss(ScaledNet(c=c), zero, batch, key, BIG)[0]
+    def L(c, obs, hyp, thz):
+        net = ScaledNet(c=c)
+        return -jnp.mean(jax.vmap(net)(obs, hyp)) + jnp.mean(grid_logZ(net, thz, GO, GP, 32))
 
     grads = []
-    for i in range(12):
-        kb, kp = jax.random.split(jax.random.PRNGKey(i))
-        grads.append(float(jax.grad(L_scale)(1.0, gen_hit_batch(kb, 4000), kp)))
+    for i in range(10):
+        obs, hyp = gen_hit_batch(jax.random.PRNGKey(i), 3000)
+        grads.append(float(jax.grad(L)(1.0, obs, hyp, _subsample(hyp, 256, 100 + i))))
     grads = np.array(grads)
     se = grads.std(ddof=1) / np.sqrt(len(grads))
-    assert abs(grads.mean()) < 4 * se, f"not stationary at exact ratio: {grads.mean():.4f}±{se:.4f}"
-
-    # (b) a flexible a_psi (ZNet) fit against the FIXED exact critic must drive a_hit -> 0
-    # (= log Z) from a deliberately wrong (+1.5) init.
-    exact = ExactNet()
-    znet = ZNet(width=32, depth=2, key=jax.random.PRNGKey(0))
-    # wrong init: offset the hit head's output layer bias by +1.5
-    znet = eqx.tree_at(lambda z: z.hit_mlp.layers[-1].bias, znet,
-                       znet.hit_mlp.layers[-1].bias + 1.5)
-    th_probe = gen_hit_batch(jax.random.PRNGKey(999), 2000)[1]
-    a0 = float(jnp.mean(jnp.abs(jax.vmap(znet.a_hit)(th_probe))))
-
-    opt = optax.adam(3e-3)
-    opt_state = opt.init(eqx.filter(znet, eqx.is_inexact_array))
-
-    # Train the normalizer on the unwinsorized objective: the a-direction of the
-    # winsorized loss is unbounded below (the clipped exp is flat, so a can run to -inf
-    # while the linear term drops) — the clip is a tail guard for a WARM-STARTED a, not a
-    # from-scratch optimizer target. At the optimum the clip is inactive anyway
-    # (test_bound_gap).
-    @eqx.filter_jit
-    def step(znet, opt_state, batch, key):
-        loss, grads = eqx.filter_value_and_grad(
-            lambda z: nwj_hit_loss(exact, z, batch, key, BIG)[0])(znet)
-        updates, opt_state = opt.update(grads, opt_state)
-        return eqx.apply_updates(znet, updates), opt_state, loss
-
-    key = jax.random.PRNGKey(1)
-    for s in range(1500):
-        key, kb, kp = jax.random.split(key, 3)
-        znet, opt_state, _ = step(znet, opt_state, gen_hit_batch(kb, 1500), kp)
-    a1 = float(jnp.mean(jnp.abs(jax.vmap(znet.a_hit)(th_probe))))
-    assert a0 > 1.0, f"wrong init not actually wrong: mean|a|={a0:.3f}"
-    assert a1 < 0.15, f"a_psi did not converge to log Z=0: mean|a|={a1:.3f} (was {a0:.3f})"
+    assert abs(grads.mean()) < 4 * se, f"MLE not stationary at true ratio: {grads.mean():.4f}±{se:.4f}"
 
 
 # ---------------------------------------------------------------------------
-# Test 2: deflation toy — the two-expectation restoring force
+# Test 2: deflation toy — restoring force = E_data[g] - E_model[g], EXACT via the grid
 # ---------------------------------------------------------------------------
 
-def test_two_expectation_restoring_force_and_deflation_not_descent():
-    """The NWJ tilt-direction gradient is E_matched[s] - E_model[s] (self-normalized IW
-    over the shuffled sample) — the counterweight one-sided moment penalties lack — and
-    deflating the critic is NOT a descent direction, whereas it IS for a one-sided
-    penalty."""
-    eps = 0.05
-    a_calib = ConstZ(coeff=eps)          # a = log Z of TiltedNet(eps) = eps*theta_E
-    obs, hyp = gen_hit_batch(jax.random.PRNGKey(7), 40000)
-    batch = (obs, hyp)
-    key = jax.random.PRNGKey(11)
+def test_restoring_force_exact_no_iw():
+    """At a tilted f, the MLE gradient in the tilt direction equals -E_data[g] + E_model[g]
+    with the model expectation computed EXACTLY from the grid (softmax over quadrature
+    points), not by self-normalized importance weighting. The counterweight E_model is
+    material — the two-expectation structure the one-sided penalties lacked — and deflating
+    the f-contrast is not a descent direction."""
+    delta = 0.15
+    g = lambda o: o[0]                                    # tilt observable = hit x
+    obs, hyp = gen_hit_batch(jax.random.PRNGKey(1), 8000)
+    thz = _subsample(hyp, 512, 2)
 
-    # NWJ gradient in the tilt (theta_E) direction at eps, with a tracking (calibrated).
-    def L_eps(e, batch, key):
-        return nwj_hit_loss(TiltGradNet(eps=e), a_calib, batch, key, BIG)[0]
+    def L(d):
+        net = TiltXNet(delta=d)
+        return -jnp.mean(jax.vmap(net)(obs, hyp)) + jnp.mean(grid_logZ(net, thz, GO, GP, 64))
 
-    grad_eps = float(jax.grad(L_eps)(eps, batch, key))
+    grad = float(jax.grad(L)(delta))
 
-    # Manual two-expectation form: -E_matched[s] + E_shuffled[w s], w = e^{f-a}.
-    perm = jax.random.permutation(key, hyp.shape[0])
-    hyp_s = hyp[perm]
-    net = TiltGradNet(eps=jnp.asarray(eps))
-    f_s = jax.vmap(net)(obs, hyp_s)
-    a_s = jax.vmap(a_calib.a_hit)(hyp_s)
-    w = np.asarray(jnp.exp(f_s - a_s))
-    s_s, s_m = np.asarray(hyp_s[:, 6]), np.asarray(hyp[:, 6])
-    E_matched = s_m.mean()
-    analytic = -E_matched + (w * s_s).mean()
-    E_model_sn = (w * s_s).sum() / w.sum()          # self-normalized model expectation
+    # Exact model expectation via the grid (no IW): p_f(grid|theta) = softmax(logp + f).
+    net = TiltXNet(delta=delta)
 
-    # (i) the gradient IS the two-expectation form (exact identity).
-    assert abs(grad_eps - analytic) < 1e-3, f"grad {grad_eps:.4f} != two-exp {analytic:.4f}"
-    # (ii) calibrated => it equals E_model[s] - E_matched[s] (self-normalized).
-    assert abs(w.mean() - 1.0) < 0.02, f"a not calibrated: mean(w)={w.mean():.4f}"
-    assert abs(grad_eps - (E_model_sn - E_matched)) < 0.05
-    # (iii) the counterweight is MATERIAL: a one-sided penalty's force is ~-E_matched (~-5),
-    # the NWJ gradient is tiny because E_model[s] ~ E_matched[s] cancels it.
-    assert abs(E_matched) > 4.0
-    assert abs(grad_eps) < 0.3 * abs(E_matched)
+    def e_model(theta):
+        f = jax.vmap(lambda o: net(o, theta))(GO)
+        return jnp.sum(jax.nn.softmax(GP + f) * jax.vmap(g)(GO))
 
-    # Deflation: scale c on the (calibrated) critic. NWJ is minimized at the true scale
-    # c=1, so deflating (c<1) INCREASES the loss; the one-sided score-mean penalty
-    # decreases monotonically toward the collapsed critic f==0.
-    def L_c(c):
-        return float(nwj_hit_loss(ScaledNet(c=c, eps=eps), a_calib, batch, key, BIG)[0])
+    E_model = float(jnp.mean(jax.vmap(e_model)(thz)))
+    E_data = float(jnp.mean(jax.vmap(g)(obs)))
 
-    def score_E_mean(c):
-        sc = jax.vmap(lambda h, th: jax.grad(
-            lambda t: ScaledNet(c=c, eps=eps)(h, t))(th)[6])(obs, hyp)
-        return float(jnp.mean(sc))
+    assert abs(grad - (-E_data + E_model)) < 1e-3, \
+        f"grad {grad:.4f} != -E_data+E_model {-E_data + E_model:.4f}"
+    assert abs(E_model - E_data) > 0.1, "counterweight not material (E_model ~ E_data)"
 
-    penalty = lambda c: 0.5 * score_E_mean(c) ** 2
-    assert L_c(0.9) > L_c(1.0), "deflation should NOT be a descent direction for NWJ"
-    assert penalty(0.9) < penalty(1.0), "deflation should reduce the one-sided penalty"
+    # Deflation is not a descent direction at the tilted point: shrinking the f-contrast
+    # (c<1) does not lower the MLE below its value at the true scale.
+    def L_scale(c):
+        net_c = ScaledTiltNet(c=c, delta=delta)
+        return (-jnp.mean(jax.vmap(net_c)(obs, hyp))
+                + jnp.mean(grid_logZ(net_c, thz, GO, GP, 64)))
+
+    assert L_scale(0.85) > L_scale(1.0) - 1e-6, "deflation should not reduce the MLE loss"
 
 
 # ---------------------------------------------------------------------------
-# Test 3: bound-gap toy — E_shuffled[e^{f-a}] -> 1 per stratum, clip inactive at optimum
+# Test 3: grid_logZ (differentiable) matches hit_logZ_targets (numpy reference)
 # ---------------------------------------------------------------------------
 
-def test_bound_gap_converges_and_clip_inactive():
-    """Fit a_psi against the exact critic to convergence: the per-E-stratum bound gap
-    E_shuffled[e^{f-a}] - 1 -> 0 in every populated stratum, and the winsorization clip is
-    inactive at the calibrated optimum (clip bias vanishes)."""
-    exact = ExactNet()
-    znet = ZNet(width=32, depth=2, key=jax.random.PRNGKey(2))
-    opt = optax.adam(2e-3)
-    opt_state = opt.init(eqx.filter(znet, eqx.is_inexact_array))
-
-    @eqx.filter_jit
-    def step(znet, opt_state, batch, key):
-        loss, grads = eqx.filter_value_and_grad(
-            lambda z: nwj_hit_loss(exact, z, batch, key, BIG)[0])(znet)
-        updates, opt_state = opt.update(grads, opt_state)
-        return eqx.apply_updates(znet, updates), opt_state, loss
-
-    key = jax.random.PRNGKey(3)
-    for s in range(2500):
-        key, kb, kp = jax.random.split(key, 3)
-        znet, opt_state, _ = step(znet, opt_state, gen_hit_batch(kb, 1500), kp)
-
-    # (i) the population identity E_shuffled[e^{f-a}] -> 1 per stratum: verified with the
-    # UNWINSORIZED estimator (the identity is about the true mean), averaged over a few
-    # large batches to tame the lognormal-mean sampling noise.
-    gaps = []
-    clip_fracs = []
-    for i in range(4):
-        kb, kp = jax.random.split(jax.random.PRNGKey(5000 + i))
-        _, aux_b = nwj_hit_loss(exact, znet, gen_hit_batch(kb, 20000), kp, BIG)
-        gaps.append(np.asarray(aux_b.gap))
-        # (ii) clip-inactivity receipt: evaluate clip_frac with the PRODUCTION clip.
-        _, aux_c = nwj_hit_loss(exact, znet, gen_hit_batch(kb, 20000), kp, CLIP_C)
-        clip_fracs.append(float(aux_c.clip_frac))
-    gap = np.nanmean(np.stack(gaps), axis=0)
-    assert (~np.isnan(gap)).sum() >= N_STRATA - 1     # all interior strata sampled
-    assert np.nanmax(np.abs(gap)) < 0.05, f"bound gap not calibrated to 1: {gap}"
-    # at the calibrated optimum the winsorization clip touches < 0.1% of shuffled rows:
-    # the clip bias vanishes because it is (essentially) never engaged.
-    assert np.mean(clip_fracs) < 1e-3, f"clip not inactive at optimum: {np.mean(clip_fracs):.4g}"
+def test_grid_logZ_matches_reference():
+    """The differentiable grid quadrature agrees with the independent numpy reference that
+    integrates the full grid — they share the quadrature."""
+    hitnet = HitNet(key=jax.random.PRNGKey(1))
+    S, T = 24, 30
+    pos = jax.random.normal(jax.random.PRNGKey(0), (S, 3)) * 500.0
+    t = jnp.linspace(-100.0, 200.0, T)
+    rng = np.random.default_rng(0)
+    p1 = np.abs(rng.normal(size=(S, T)))
+    p1[p1 < 0.2] = 0.0                                   # some empty cells
+    p1 = p1 / p1.sum()
+    go, gp = build_hit_grid(pos, t, jnp.asarray(p1, jnp.float32))
+    with np.errstate(divide="ignore"):
+        full_logp = jnp.asarray(np.where(p1 > 0, np.log(p1), -np.inf), jnp.float32)
+    thetas = jax.random.uniform(jax.random.PRNGKey(3), (16, 7))
+    a = np.asarray(grid_logZ(hitnet, thetas, go, gp, chunk=4))
+    b = hit_logZ_targets(hitnet, thetas, pos, t, full_logp, chunk=4)
+    assert np.max(np.abs(a - b)) < 1e-4, f"grid_logZ vs reference max|diff|={np.max(np.abs(a - b))}"
 
 
 # ---------------------------------------------------------------------------
-# Test 4: linearly-extended exp recovers from the saturated regime (A3 avalanche fix)
+# Test 4: MLE is bounded below — a localized f-spike is priced by log Z (no runaway)
 # ---------------------------------------------------------------------------
 
-def test_linear_tail_recovers_from_saturation():
-    """Starting deep in the tail (a offset far below log Z so f-a > c for ~all rows), the
-    linearly-extended exp keeps a nonzero restoring gradient and RECOVERS (gap -> <0.1, no
-    divergence), whereas the hard clamp's gradient vanishes there and would drive a further
-    down (the A3 joint-phase avalanche)."""
-    exact = ExactNet()
-    znet = ZNet(width=64, depth=3, key=jax.random.PRNGKey(5))
-    # push a_hit far below log Z (=~0), so u = f - a is large-positive (saturated regime)
-    OFF = 5.0
-    znet = eqx.tree_at(lambda z: z.hit_mlp.layers[-1].bias, znet,
-                       znet.hit_mlp.layers[-1].bias - OFF)
+def test_mle_bounded_below_on_spike():
+    """A net that puts f = +amp on one grid cell cannot lower the loss without bound: log Z
+    grows ~amp while the matched term barely moves (data rarely lands there), so the loss
+    is coercive in amp (bounded below). This is exactly what the linear-tail NWJ lacked."""
+    obs, hyp = gen_hit_batch(jax.random.PRNGKey(1), 6000)
+    thz = _subsample(hyp, 256, 5)
+    cell = int(np.argmax(np.asarray(GP)))                # a high-density (populated) cell
 
-    kb, kp = jax.random.split(jax.random.PRNGKey(0))
-    obs, hyp = gen_hit_batch(kb, 4000)
-    _, aux0 = nwj_hit_loss(exact, znet, (obs, hyp), kp, CLIP_C)
-    # deeply saturated start: the shuffled term is tail-dominated (gap >> 1) with a large
-    # fraction of rows beyond the knee. ("100% beyond c" is unreachable — mismatched pairs
-    # have a heavy negative f_s tail — but the loss lives in the linear-tail regime.)
-    assert np.nanmax(np.abs(np.asarray(aux0.gap))) > 20.0, "start not saturated (gap small)"
-    assert float(aux0.clip_frac) > 0.2, f"start not saturated: clip_frac={float(aux0.clip_frac)}"
+    class SpikeNet(eqx.Module):
+        amp: jnp.ndarray
 
-    # Inline receipt (fully-saturated limit, evaluated directly on u = f-a > c so it is
-    # independent of the toy's f_s tail): dL/da = +1 (matched) + d/da[shuffled]. For the
-    # HARD clamp the tail is flat -> shuffled gradient 0 -> dL/da = +1 > 0, i.e. descent
-    # DRIVES a DOWN -> deeper saturation -> the A3 avalanche. For the linear extension the
-    # tail slope is exp(c) -> dL/da = 1 - exp(c) < 0, i.e. descent RAISES a -> recovery.
-    u = jnp.full((2000,), CLIP_C + 5.0)
-    g_soft = 1.0 + float(jax.grad(lambda da: jnp.mean(soft_exp(u - da, CLIP_C)))(0.0))
-    g_hard = 1.0 + float(jax.grad(
-        lambda da: jnp.mean(jnp.exp(jnp.minimum(u - da, CLIP_C))))(0.0))
-    assert g_hard > 0.0, f"hard clamp: dL/da should be +1 (divergent), got {g_hard:.3f}"
-    assert g_soft < 0.0, f"soft exp: dL/da should be <0 (recovery), got {g_soft:.3f}"
+        def __call__(self, h, th):
+            return self.amp * jnp.exp(-jnp.sum((h - GO[cell]) ** 2) / (2 * 5.0**2))
 
-    # The linearly-extended exp RECOVERS from the saturated start to calibration.
-    opt = optax.adam(1.5e-2)
-    opt_state = opt.init(eqx.filter(znet, eqx.is_inexact_array))
+    def L(amp):
+        net = SpikeNet(amp=amp)
+        return -jnp.mean(jax.vmap(net)(obs, hyp)) + jnp.mean(grid_logZ(net, thz, GO, GP, 64))
 
-    @eqx.filter_jit
-    def step(znet, opt_state, batch, key):
-        loss, grads = eqx.filter_value_and_grad(
-            lambda z: nwj_hit_loss(exact, z, batch, key, CLIP_C)[0])(znet)
-        updates, opt_state = opt.update(grads, opt_state)
-        return eqx.apply_updates(znet, updates), opt_state, loss
-
-    key = jax.random.PRNGKey(7)
-    last = np.inf
-    for _ in range(2500):
-        key, kb2, kp2 = jax.random.split(key, 3)
-        znet, opt_state, last = step(znet, opt_state, gen_hit_batch(kb2, 1500), kp2)
-    assert np.isfinite(float(last)), "soft loss diverged (non-finite)"
-    # average the gap over a few batches (high-E strata are sparse -> per-batch noisy).
-    gaps, cfs = [], []
-    for i in range(6):
-        kb2, kp2 = jax.random.split(jax.random.PRNGKey(4243 + i))
-        _, aux1 = nwj_hit_loss(exact, znet, gen_hit_batch(kb2, 10000), kp2, CLIP_C)
-        gaps.append(np.asarray(aux1.gap))
-        cfs.append(float(aux1.clip_frac))
-    gap = np.nanmean(np.stack(gaps), axis=0)
-    assert np.nanmax(np.abs(gap)) < 0.1, f"did not recover to calibration: {gap}"
-    assert np.mean(cfs) < 1e-2, f"still saturated after recovery: {np.mean(cfs)}"
+    vals = [float(L(a)) for a in (0.0, 5.0, 15.0, 30.0)]
+    assert all(np.isfinite(vals)), f"loss not finite on spike: {vals}"
+    assert vals[0] < vals[1] < vals[2] < vals[3], f"loss not coercive in amp: {vals}"
+    assert float(jax.grad(L)(20.0)) > 0.0, "loss should be coercive (dL/damp > 0) — no runaway"

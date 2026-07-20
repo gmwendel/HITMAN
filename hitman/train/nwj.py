@@ -1,64 +1,43 @@
-"""NWJ variational objective: a self-normalizing replacement for BCE ratio training.
+"""Exact-quadrature tilted-family MLE for the HITMAN per-hit / per-event surrogates.
 
-Why this module exists
-----------------------
-BCE-trained ratios are only defined up to a theta-dependent additive constant: the
-learned logit approaches ``log p(x|theta)/p(x) + c(theta)`` for ANY c, because the
-classifier loss is invariant to a shift that is constant in x at fixed theta. The
-normalization ``Z(theta) = E_{x~p(x)}[e^{f(x,theta)}]`` is therefore uncontrolled, and
-the downstream score identity / moment constraints are violated by exactly that
-uncontrolled drift. Enforcing a one-sided moment identity as a penalty FAILS: the model
-minimizes the penalty by deflating its own statistics (shrinking the f-contrast) rather
-than matching the target, because the *model-measure counterweight* — the second
-expectation that says "if you shrink f you pay in the exp term" — is absent from a
-one-sided penalty.
+WHY (three failed estimators -> exact quadrature)
+--------------------------------------------------
+The surrogate is a tilted exponential family
+    p_f(x|theta) = p_marg(x) * exp(f(x,theta)) / Z(theta),  Z(theta)=E_{x~p_marg}[e^{f}].
+Training needs the log-partition log Z(theta). Estimating it from MC-shuffled
+(marginal-permutation) pairs is DEAD for this detector:
 
-The Nguyen-Wainwright-Jordan (NWJ / f-GAN KL) variational objective restores BOTH halves
-in a single loss. For a critic ``T(x,theta) = f_phi(x,theta) - a_psi(theta)``,
+* BCE leaves Z uncontrolled (the classifier is invariant to a theta-dependent shift).
+* NWJ with a HARD clamp on the shuffled exp -> a-runaway: the clipped tail is flat, its
+  restoring gradient on the normalizer a vanishes, the clipped fraction avalanches and
+  a -> -inf (A3 attempt 2).
+* NWJ with a LINEARLY-EXTENDED exp -> f-runaway: the normalization is carried by shuffled
+  rows that land near the matched manifold, which occur at rate ~exp(-D2) with the
+  data-model squared distance D2 ~ 200-800 here. The TRUE exponential prices those rare
+  rows at e^{f}, so rate*cost = O(1); ANY sub-exponential tail collapses that product to
+  ~0, so inflating f on matched configurations becomes nearly free and the objective is
+  effectively unbounded in the matched directions (A3 attempt 3: clipf~0.009 but maxgap
+  1e8, nwj -8e7).
 
-    L(phi, psi) = - E_matched[ f_phi(x,theta) - a_psi(theta) ]
-                  + E_shuffled[ exp( f_phi(x,theta) - a_psi(theta) ) ]  - 1 ,
+No tail shape fixes an estimator whose informative samples arrive at rate exp(-D2). But
+the per-hit observation domain is SMALL and GRIDDED (241 sensors x an 840-bin t-grid;
+empirical marginal pmf cached in probe_grids.npz), so log Z is computed EXACTLY by
+quadrature over that grid. No shuffled rows, no exp tail, no znet in the loss. The loss is
+then the exact tilted-family MLE:  L(f) = -E_matched[f] + E_theta[log Z(theta)].
 
-where *matched* pairs are drawn from the joint p(x,theta) and *shuffled* pairs from the
-product p(x)p(theta) (exactly the marginal-permutation construction the BCE path uses in
-``hitman.train.loop._batch_loss``). At the joint minimum:
+ChargeNet is treated identically with a 2-D (q, nhit) empirical-pmf grid
+(``build_charge_grid``): its overlap problem does not bite (one aggregate observable, D2
+tiny; only ~300 populated (q,N) cells), so the exact partition is cheap and removes the
+last MC estimator. This is the route-(a) the earlier NWJ-charge fallback deferred to.
 
-  * ``dL/df`` gives ``f_phi(x,theta) - a_psi(theta) = log p(x,theta)/(p(x)p(theta))``,
-    i.e. f recovers the true per-hit log-ratio up to the additive a;
-  * ``dL/da`` gives, per theta, ``E_{x~p(x)}[e^{f - a}] = 1`` — i.e.
-    ``a_psi(theta) = log Z(theta)``. The normalizer is learned, not left free.
-
-The exp term is the missing counterweight: the gradient of L in the direction that
-deflates the f-contrast is ``E_matched[s] - E_model[s]`` (model expectation under the
-self-normalized ``e^{f-a}`` reweighting of the shuffled sample), NOT the one-sided
-``E_matched[s]`` a moment penalty sees. Deflation is no longer a free descent direction.
-
-ChargeNet route (design decision, see director report)
-------------------------------------------------------
-The brief's first option was an EXACTLY-normalized MLE for chargenet: sum
-``p_marg(N) * e^{f_c((q(N),N),theta))`` over an nhit grid. That is ill-posed here:
-``ChargeNet`` consumes ``charge = (q, nhit)`` as two *continuous* features
-(``charge/40 - 1``), so the exact partition ``Z_c(theta) = E_{p(q,nhit)}[e^{f_c}]`` is a
-2-D integral over the joint charge marginal with q continuous. Reducing it to a 1-D sum
-over the nhit grid would need a well-defined ``q(N)`` — i.e. the conditional p(q|N),
-itself a continuous integral we do not have. So we take the documented fallback: chargenet
-gets its OWN NWJ term with its own scalar normalizer head inside ``ZNet`` (``a_psi``
-returns two outputs, hit and charge). This is exactly consistent with the hit path and
-needs no per-N grid.
-
-Optimizer split
----------------
-``a_psi = log Z(theta)`` is a deterministic functional of the current phi and must TRACK
-phi as it moves; a lagging normalizer re-introduces the very deflation bias NWJ removes.
-We therefore give psi (znet) a larger learning rate than phi via ``optax.multi_transform``
-(default 10x). This is simpler and more jit-friendly than an EMA target and keeps the
-inner normalization calibrated throughout training.
+The znet is retained ONLY as a post-training INFERENCE CACHE: fit a(theta) ~= log Z_hit of
+the FINAL f so downstream MLE/NUTS can subtract a fast normalizer (``fit_znet_cache``); it
+plays no role in training now.
 """
 
 import os
 import time
 from dataclasses import dataclass, field
-from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -71,41 +50,13 @@ from hitman.nn.mlp import MLP
 from hitman.train.recipe import _window_stream
 from hitman.train.resident import charge_batch, hit_batch
 
-# Knee of the linearly-extended exponential ``soft_exp`` used in the shuffled term. Beyond
-# u = f - a = CLIP_C the exp grows LINEARLY (slope exp(c)) instead of exponentially, which
-# tames the heavy right tail of e^{f-a} early in training (a far from log Z) without a
-# hard clamp's zero-gradient flat region. log(100): a single mis-normalized row past the
-# knee contributes ~100x the calibrated value plus a bounded-slope linear term. At the
-# optimum f - a = log r on shuffled (independent) pairs, whose exp has mean 1 and rarely
-# exceeds 100, so the extension is inactive there (bound-gap toy). Static, never trained.
-# NOTE: a hard clamp here caused the A3 joint-phase avalanche (a -> -inf); see soft_exp.
-CLIP_C = float(np.log(100.0))
-
-# Pre-calibration clip. The WINSORIZED loss (CLIP_C) is unbounded below in a: once f-a
-# exceeds the clip on the calibrating mass, the exp is flat there and its restoring
-# gradient vanishes, so training a alone runs it to -inf (observed as maxgap -> clip,
-# loss -> -inf). The normalizer must therefore be pre-calibrated on an essentially
-# unwinsorized objective — clip high enough to be inactive for a near log Z, yet finite
-# to bound e^{f-a} against float overflow. Once a is calibrated, the production CLIP_C is
-# inactive and safe in the joint phase.
-PRECAL_CLIP = float(np.log(1e6))
-
-# Fixed 1-MeV strata on true E for the per-stratum bound-gap receipt E[e^{f-a}]-1.
-STRATA_EDGES = np.arange(0.0, 10.5, 1.0)          # 11 edges -> 10 strata
-_EDGES = jnp.asarray(STRATA_EDGES, jnp.float32)
-N_STRATA = len(STRATA_EDGES) - 1
-
-# ZNet feature transform maps theta(7) -> 8 whitened features, mirroring the hyp-only
-# columns of ``ft.hit_features``: positions/scale, unit direction, t/scale, (E-1).
+# ZNet feature transform maps theta(7) -> 8 whitened features (inference-cache only now).
 N_THETA_FEATURES = 8
 
 
 def theta_features(theta: jnp.ndarray) -> jnp.ndarray:
-    """(theta (7,)) -> (8,) whitened normalizer-net input features.
-
-    Z(theta) genuinely depends on theta_t: f depends on dt = t_hit - t_hyp, and the
-    coherent time augmentation shifts theta_t at train time, so t is carried here.
-    """
+    """(theta (7,)) -> (8,) whitened normalizer-net input features (positions/scale,
+    unit direction, t/scale, E-1). Used only by the ZNet inference cache."""
     return jnp.concatenate([
         theta[:3] / ft.POSITION_SCALE,
         ft.direction(theta),
@@ -114,182 +65,152 @@ def theta_features(theta: jnp.ndarray) -> jnp.ndarray:
     ])
 
 
-class ZNet(eqx.Module):
-    """Normalizer network a_psi(theta) = (log Z_hit(theta), log Z_charge(theta)).
-
-    Two separate MLP heads (theta(7) -> scalar each): the hit head is warm-started by
-    regressing onto a grid estimate of log Z_hit (see ``hit_logZ_targets`` /
-    ``regress_znet_hit_head``); the charge head has no cheap grid estimate and is left to
-    the joint NWJ phase to calibrate (its init is ~0, a sensible start since ChargeNet is
-    warm-started to a near-normalized ratio).
-    """
-
-    hit_mlp: MLP
-    charge_mlp: MLP
-
-    def __init__(self, width: int = 128, depth: int = 3, *, key, activation: str = "mish"):
-        kh, kc = jax.random.split(key)
-        self.hit_mlp = MLP(N_THETA_FEATURES, width, depth, key=kh, activation=activation)
-        self.charge_mlp = MLP(N_THETA_FEATURES, width, depth, key=kc, activation=activation)
-
-    def a_hit(self, theta: jnp.ndarray) -> jnp.ndarray:
-        """Scalar hit normalizer log Z_hit(theta)."""
-        return self.hit_mlp(theta_features(theta))
-
-    def a_charge(self, theta: jnp.ndarray) -> jnp.ndarray:
-        """Scalar charge normalizer log Z_charge(theta)."""
-        return self.charge_mlp(theta_features(theta))
-
-    def __call__(self, theta: jnp.ndarray):
-        """(a_hit, a_charge) for one theta."""
-        f = theta_features(theta)
-        return self.hit_mlp(f), self.charge_mlp(f)
-
-
-class NWJAux(NamedTuple):
-    """Diagnostics for a NWJ loss evaluation (not differentiated).
-
-    ``gap`` (N_STRATA,) is the per-1-MeV-E-stratum bound gap E_shuffled[soft_exp(f-a)] - 1
-    (using the same linearly-extended exp the loss uses), with nan for empty strata; it
-    -> 0 in every stratum at the calibrated optimum. ``clip_frac`` is the fraction of
-    shuffled rows BEYOND the knee c (f-a > c, i.e. in the linear-tail region) — a receipt
-    that the tail extension is inactive once a is calibrated (clip_frac -> ~0).
-    """
-
-    gap: jnp.ndarray        # (N_STRATA,)
-    clip_frac: jnp.ndarray  # scalar
-
-
-def _stratum_gap(ex: jnp.ndarray, e: jnp.ndarray) -> jnp.ndarray:
-    """Per-stratum mean of ``ex`` minus 1, keyed on true E ``e``; nan for empty strata."""
-    k = jnp.clip(jnp.searchsorted(_EDGES, e) - 1, 0, N_STRATA - 1)
-    sums = jax.ops.segment_sum(ex, k, num_segments=N_STRATA)
-    cnts = jax.ops.segment_sum(jnp.ones_like(ex), k, num_segments=N_STRATA)
-    return jnp.where(cnts > 0, sums / jnp.maximum(cnts, 1.0) - 1.0, jnp.nan)
-
-
-def soft_exp(u, c):
-    """Linearly-extended exponential: exp(u) for u <= c, else exp(c)*(1 + (u - c)).
-
-    Monotone, convex, C^1 (value and slope match exp at u=c), and Lipschitz beyond c
-    (slope pinned at exp(c) = the tail is LINEAR, not exponential). Crucially its
-    derivative NEVER vanishes (exp(c) > 0 in the tail), so the restoring gradient on the
-    normalizer a survives even when f-a is deep beyond c. The hard clamp min(u,c) has a
-    ZERO-gradient flat region beyond c: there the shuffled term's pull on a disappears
-    while the matched term keeps pushing a down, so the clipped fraction avalanches to full
-    saturation and a -> -inf (the joint-phase divergence at A3 step ~4000). Replacing the
-    clamp with this extension removes that mode by construction while keeping the
-    heavy-tail variance guard (linear, not exponential, tail growth). The masked exp uses
-    min(u,c) only to avoid overflow in the unused branch of ``where``.
-    """
-    return jnp.where(u <= c, jnp.exp(jnp.minimum(u, c)),
-                     jnp.exp(c) * (1.0 + (u - c)))
-
-
-def _nwj_loss(f_m, a_m, f_s, a_s, e_s, clip_c):
-    """Core NWJ loss from matched/shuffled critic values; shared by hit and charge.
-
-    ``f_m, a_m`` matched critic parts; ``f_s, a_s`` shuffled; ``e_s`` shuffled true E for
-    the stratified bound-gap aux. The shuffled term uses the linearly-extended exponential
-    ``soft_exp`` (see its docstring) at knee ``clip_c``. Returns (loss, NWJAux).
-    """
-    d_s = f_s - a_s
-    ex = soft_exp(d_s, clip_c)
-    matched = jnp.mean(f_m - a_m)
-    shuffled = jnp.mean(ex)
-    loss = -matched + shuffled - 1.0
-    aux = NWJAux(gap=_stratum_gap(ex, e_s),
-                 clip_frac=jnp.mean((d_s > clip_c).astype(jnp.float32)))
-    return loss, aux
-
-
-def nwj_hit_loss(hitnet, znet, batch, key, clip_c: float = CLIP_C):
-    """Per-hit NWJ loss for (hitnet phi, znet hit head).
-
-    ``batch = (obs (B,4), hyp (B,7))`` exactly as ``hit_batch`` returns. Matched pairs are
-    the aligned rows (obs[i], hyp[i]); shuffled pairs are (obs[i], hyp[perm[i]]) with a
-    fresh permutation from ``key`` — the same marginal construction as
-    ``hitman.train.loop._batch_loss``. Returns (loss, NWJAux).
-
-    (The brief's signature is ``(hitnet, znet, batch, clip_c)``; ``key`` is added because
-    the marginal permutation needs randomness, mirroring ``_batch_loss(model, obs, hyp,
-    key, ...)`` which takes a key for the identical reason.)
-    """
-    obs, hyp = batch
-    perm = jax.random.permutation(key, hyp.shape[0])
-    hyp_s = hyp[perm]
-    f_m = jax.vmap(hitnet)(obs, hyp)
-    a_m = jax.vmap(znet.a_hit)(hyp)
-    f_s = jax.vmap(hitnet)(obs, hyp_s)
-    a_s = jax.vmap(znet.a_hit)(hyp_s)
-    return _nwj_loss(f_m, a_m, f_s, a_s, hyp_s[:, ft.ENERGY], clip_c)
-
-
-def nwj_charge_loss(chargenet, znet, batch, key, clip_c: float = CLIP_C):
-    """Per-event NWJ loss for (chargenet, znet charge head).
-
-    ``batch = (charge (B,2), hyp (B,7))`` as ``charge_batch`` returns. Same matched /
-    shuffled convention as ``nwj_hit_loss``. Returns (loss, NWJAux).
-    """
-    charge, hyp = batch
-    perm = jax.random.permutation(key, hyp.shape[0])
-    hyp_s = hyp[perm]
-    f_m = jax.vmap(chargenet)(charge, hyp)
-    a_m = jax.vmap(znet.a_charge)(hyp)
-    f_s = jax.vmap(chargenet)(charge, hyp_s)
-    a_s = jax.vmap(znet.a_charge)(hyp_s)
-    return _nwj_loss(f_m, a_m, f_s, a_s, hyp_s[:, ft.ENERGY], clip_c)
-
-
 # ---------------------------------------------------------------------------
-# ZNet hit-head warm start: regress a_hit(theta) onto a grid estimate of log Z_hit
+# Exact log-partition by grid quadrature
 # ---------------------------------------------------------------------------
 
-def hit_logZ_targets(hitnet, thetas, grid_pos, grid_t, grid_logp, chunk: int = 64):
-    """Grid estimate of log Z_hit(theta) = log E_{x~p(x)}[e^{f(x,theta)}].
+def grid_logZ(net, thetas, grid_obs, grid_logp, chunk: int = 64):
+    """Exact log Z(theta) = logsumexp_g [ grid_logp[g] + f(grid_obs[g], theta) ] per theta.
 
-    p(x) over hits is approximated by the (sensor, time) marginal pmf ``grid_logp``
-    (log of p1 in ``probe_grids.npz``). For each theta,
-    ``log Z = logsumexp_{s,t} ( grid_logp[s,t] + f((grid_pos[s], grid_t[t]), theta) )``.
+    Differentiable in ``net``; vmapped over ``thetas`` in chunks of ``chunk`` (via
+    ``jax.lax.map``) so the (chunk, n_grid) intermediate stays bounded. Works for any net
+    with a ``(obs, theta) -> scalar`` call: hitnet over the (sensor,time) grid, chargenet
+    over the (q,nhit) grid.
 
     Parameters
     ----------
-    hitnet : callable ``(hit (4,), theta (7,)) -> scalar``
-    thetas : (M, 7) array of thetas to evaluate.
-    grid_pos : (S, 3) sensor positions.
-    grid_t : (T,) time centers.
-    grid_logp : (S, T) log marginal pmf (log of p1); need not be exactly normalized.
-    chunk : thetas per device call (bounds the (M, S*T) intermediate).
+    net : callable ``(obs, theta) -> scalar logit``.
+    thetas : (M, 7) thetas to normalize.
+    grid_obs : (G, d_obs) quadrature points (empty-pmf cells should be dropped upstream).
+    grid_logp : (G,) log empirical marginal pmf at the grid points.
+    chunk : thetas per vmap call.
 
-    Returns (M,) float32 log Z estimates.
+    Returns (M,) exact log Z.
+    """
+    M = thetas.shape[0]
+
+    def one(theta):
+        f = jax.vmap(lambda o: net(o, theta))(grid_obs)          # (G,)
+        return jax.scipy.special.logsumexp(grid_logp + f)
+
+    if chunk >= M:
+        return jax.vmap(one)(thetas)
+    nc = -(-M // chunk)                                          # ceil
+    pad = nc * chunk - M
+    th = thetas if pad == 0 else jnp.concatenate(
+        [thetas, jnp.broadcast_to(thetas[:1], (pad, thetas.shape[1]))], axis=0)
+    out = jax.lax.map(lambda tc: jax.vmap(one)(tc),
+                      th.reshape(nc, chunk, thetas.shape[1])).reshape(-1)
+    return out[:M]
+
+
+def mle_hit_loss(net, batch_matched, thetas_z, grid_obs, grid_logp, chunk: int = 64):
+    """Exact tilted-family MLE loss for a ``(obs, theta) -> logit`` net.
+
+    ``-E_matched[f] + mean_{theta in thetas_z} log Z(theta)`` with the EXACT grid
+    partition. ``batch_matched = (obs (B,d), hyp (B,7))`` are true (x, theta) pairs;
+    ``thetas_z`` (n_z, 7) is a per-step subsample of the matched thetas (the estimator of
+    E_theta[log Z] is unbiased for the subsample average and log Z is exact per theta — no
+    heavy tail anywhere). Named ``mle_hit_loss`` but reused verbatim for the charge net
+    (same call signature, its own grid). Bounded below: inflating f on any configuration
+    raises log Z through the quadrature by at least as much (Jensen), so f cannot run away.
+    """
+    obs, hyp = batch_matched
+    f_m = jax.vmap(net)(obs, hyp)
+    logZ = grid_logZ(net, thetas_z, grid_obs, grid_logp, chunk)
+    return -jnp.mean(f_m) + jnp.mean(logZ)
+
+
+def build_hit_grid(grid_pos, grid_t, p1):
+    """(sensor pos (S,3), t-centers (T,), marginal pmf p1 (S,T)) -> (grid_obs (G,4),
+    grid_logp (G,)) with empty-pmf cells DROPPED (they contribute 0 to logsumexp; dropping
+    them just saves f-evals). G = #populated (sensor,time) cells."""
+    S, T = p1.shape
+    pos_rep = np.repeat(np.asarray(grid_pos), T, axis=0)               # (S*T, 3)
+    t_rep = np.tile(np.asarray(grid_t), S)[:, None]                    # (S*T, 1)
+    obs = np.concatenate([pos_rep, t_rep], axis=1).astype(np.float32)  # (S*T, 4)
+    p = np.asarray(p1, np.float64).reshape(-1)
+    keep = p > 0
+    with np.errstate(divide="ignore"):
+        logp = np.log(p[keep]).astype(np.float32)
+    return jnp.asarray(obs[keep]), jnp.asarray(logp)
+
+
+def build_charge_grid(charge, n_q_bins: int = 200, n_max: int = 320,
+                      q_hi_quantile: float = 0.9995):
+    """Empirical 2-D (q, nhit) marginal pmf as a quadrature grid, empties dropped.
+
+    ChargeNet consumes charge = (q, nhit) as continuous features; the exact partition
+    Z_c(theta) = E_{q,N}[e^{f_c}] is a 2-D integral. The empirical (q-bin x N) histogram IS
+    that marginal, so summing p_marg * e^{f_c} over the populated cells is the exact
+    quadrature (charge D2 is tiny — only ~300 cells are populated on the 5M store).
+    """
+    charge = np.asarray(charge)
+    q = charge[:, 0]
+    nh = np.clip(charge[:, 1].astype(np.int64), 0, n_max)
+    q_edges = np.linspace(0.0, float(np.quantile(q, q_hi_quantile)), n_q_bins + 1)
+    q_centers = 0.5 * (q_edges[:-1] + q_edges[1:])
+    qi = np.clip(np.digitize(q, q_edges) - 1, 0, n_q_bins - 1)
+    counts = np.zeros((n_q_bins, n_max + 1), np.float64)
+    np.add.at(counts, (qi, nh), 1.0)
+    pmf = (counts / counts.sum()).reshape(-1)
+    QC, NN = np.meshgrid(q_centers, np.arange(n_max + 1), indexing="ij")
+    obs = np.stack([QC.ravel(), NN.ravel()], axis=1).astype(np.float32)
+    keep = pmf > 0
+    with np.errstate(divide="ignore"):
+        logp = np.log(pmf[keep]).astype(np.float32)
+    return jnp.asarray(obs[keep]), jnp.asarray(logp)
+
+
+# ---------------------------------------------------------------------------
+# ZNet inference cache (NOT used in training)
+# ---------------------------------------------------------------------------
+
+class ZNet(eqx.Module):
+    """Cache network a_psi(theta) ~= log Z_hit(theta) for a FIXED trained hitnet.
+
+    Post-training only: downstream MLE/NUTS evaluate f(hit,theta) per hit and subtract a
+    single a(theta) instead of re-integrating the grid. Fit with ``fit_znet_cache``.
+    """
+
+    hit_mlp: MLP
+
+    def __init__(self, width: int = 128, depth: int = 3, *, key, activation: str = "mish"):
+        self.hit_mlp = MLP(N_THETA_FEATURES, width, depth, key=key, activation=activation)
+
+    def a_hit(self, theta: jnp.ndarray) -> jnp.ndarray:
+        return self.hit_mlp(theta_features(theta))
+
+    def __call__(self, theta: jnp.ndarray) -> jnp.ndarray:
+        return self.hit_mlp(theta_features(theta))
+
+
+def hit_logZ_targets(hitnet, thetas, grid_pos, grid_t, grid_logp_full, chunk: int = 64):
+    """Numpy log Z_hit(theta) on the FULL (sensor,time) grid — the independent reference
+    the differentiable ``grid_logZ`` is checked against. ``grid_logp_full`` is log p1 over
+    the full S*T grid (may contain -inf); dropped-cell and full-grid logsumexp agree.
     """
     S = grid_pos.shape[0]
     T = grid_t.shape[0]
-    # (S*T, 4) grid of candidate hits; (S*T,) log weights.
-    pos_rep = jnp.repeat(grid_pos, T, axis=0)                       # (S*T, 3)
-    t_rep = jnp.tile(grid_t, S)[:, None]                           # (S*T, 1)
-    hits = jnp.concatenate([pos_rep, t_rep], axis=1)              # (S*T, 4)
-    logw = grid_logp.reshape(-1)                                   # (S*T,)
+    pos_rep = jnp.repeat(grid_pos, T, axis=0)
+    t_rep = jnp.tile(grid_t, S)[:, None]
+    hits = jnp.concatenate([pos_rep, t_rep], axis=1)
+    logw = grid_logp_full.reshape(-1)
 
     @jax.jit
     def one(theta):
-        f = jax.vmap(lambda h: hitnet(h, theta))(hits)            # (S*T,)
+        f = jax.vmap(lambda h: hitnet(h, theta))(hits)
         return jax.scipy.special.logsumexp(logw + f)
 
     thetas = jnp.asarray(thetas, jnp.float32)
-    out = []
-    for i in range(0, thetas.shape[0], chunk):
-        out.append(np.asarray(jax.vmap(one)(thetas[i:i + chunk])))
+    out = [np.asarray(jax.vmap(one)(thetas[i:i + chunk]))
+           for i in range(0, thetas.shape[0], chunk)]
     return np.concatenate(out).astype(np.float32)
 
 
 def regress_znet_hit_head(znet, thetas, targets, *, key, steps: int = 3000,
                           lr: float = 1e-3, batch: int = 1024, verbose: bool = False):
-    """Fit ``znet.a_hit`` to ``targets`` (log Z) by MSE Adam. Only the hit head moves.
-
-    ``thetas`` (M,7), ``targets`` (M,). Returns the updated ZNet. The charge head gets
-    zero gradient (loss touches only a_hit) so it is left at its init.
-    """
+    """Fit ``znet.a_hit`` to ``targets`` (log Z) by MSE Adam. Returns (znet, final_mse)."""
     thetas = jnp.asarray(thetas, jnp.float32)
     targets = jnp.asarray(targets, jnp.float32)
     M = thetas.shape[0]
@@ -299,10 +220,8 @@ def regress_znet_hit_head(znet, thetas, targets, *, key, steps: int = 3000,
 
     @eqx.filter_jit
     def step(znet, opt_state, th, tg):
-        def loss_fn(z):
-            pred = jax.vmap(z.a_hit)(th)
-            return jnp.mean((pred - tg) ** 2)
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(znet)
+        loss, grads = eqx.filter_value_and_grad(
+            lambda z: jnp.mean((jax.vmap(z.a_hit)(th) - tg) ** 2))(znet)
         updates, opt_state = opt.update(grads, opt_state)
         return eqx.apply_updates(znet, updates), opt_state, loss
 
@@ -313,169 +232,63 @@ def regress_znet_hit_head(znet, thetas, targets, *, key, steps: int = 3000,
         znet, opt_state, loss = step(znet, opt_state, thetas[idx], targets[idx])
         last = float(loss)
         if verbose and (s % max(1, steps // 10) == 0 or s == steps - 1):
-            print(f"  znet-init step {s:5d}  mse {last:.5f}", flush=True)
+            print(f"  znet-cache step {s:5d}  mse {last:.5f}", flush=True)
     return znet, last
 
 
+def fit_znet_cache(hitnet, thetas, grid_obs, grid_logp, *, key, width: int = 128,
+                   depth: int = 3, chunk: int = 64, steps: int = 3000, lr: float = 1e-3,
+                   verbose: bool = False):
+    """Post-training: exact grid log Z of the FINAL hitnet at ``thetas``, then regress a
+    ZNet onto it. Returns (znet, mse, targets)."""
+    targets = np.asarray(grid_logZ(hitnet, jnp.asarray(thetas, jnp.float32),
+                                   grid_obs, grid_logp, chunk))
+    znet = ZNet(width=width, depth=depth, key=key)
+    znet, mse = regress_znet_hit_head(znet, thetas, targets, key=key, steps=steps, lr=lr,
+                                      verbose=verbose)
+    return znet, mse, targets
+
+
 # ---------------------------------------------------------------------------
-# Joint pytree + training recipe
+# Joint model + exact-MLE recipe
 # ---------------------------------------------------------------------------
 
-class JointModel(eqx.Module):
-    """The trained pytree: critic hitnet phi, normalizer znet psi, chargenet."""
+class MleModel(eqx.Module):
+    """The trained pair: per-hit critic hitnet + per-event chargenet (no znet)."""
 
     hitnet: eqx.Module
-    znet: ZNet
     chargenet: eqx.Module
 
 
 @dataclass
-class NwjRecipeResult:
-    model: JointModel
+class MleRecipeResult:
+    model: MleModel
     best_val: float
     best_stage: str
     best_step: int
     history: list = field(default_factory=list)
 
 
-def _labels(model: JointModel) -> JointModel:
-    """multi_transform label tree: 'psi' on znet leaves, 'phi' on hitnet+chargenet."""
-    filt = eqx.filter(model, eqx.is_inexact_array)
-    return JointModel(
-        hitnet=jax.tree_util.tree_map(lambda _: "phi", filt.hitnet),
-        znet=jax.tree_util.tree_map(lambda _: "psi", filt.znet),
-        chargenet=jax.tree_util.tree_map(lambda _: "phi", filt.chargenet),
-    )
-
-
 def _val_rows(n_train, n_rows, n_val, max_val_rows):
-    """Held-out row indices (last val_fraction), subsampled to max_val_rows."""
     idx = np.arange(n_train, n_rows, dtype=np.int64)
     if n_val > max_val_rows:
         idx = idx[:: n_val // max_val_rows + 1][:max_val_rows]
     return jnp.asarray(idx, jnp.int32)
 
 
-def precalibrate_znet(
-    model: JointModel,
+def train_recipe_mle(
+    model: MleModel,
     data,
     n_hit_rows: int,
     n_event_rows: int,
     *,
     key,
-    clip_c: float = PRECAL_CLIP,
+    hit_grid,                # (grid_obs (Gh,4), grid_logp (Gh,))
+    charge_grid,             # (grid_obs (Gc,2), grid_logp (Gc,))
     w_charge: float = 1.0,
-    psi_lr: float = 1e-2,
-    hit_batch_size: int = 2**16,
-    charge_batch_size: int = 2**14,
-    max_steps: int = 2000,
-    gap_tol: float = 0.1,
-    log_every: int = 100,
-    val_fraction: float = 0.1,
-    max_val_rows: int = 2**16,
-    time_sigma: float = 50.0,
-    verbose: bool = True,
-):
-    """psi-only pre-calibration: train ONLY znet (both heads) on the NWJ objective with
-    hitnet (phi) and chargenet FROZEN, until the max per-stratum |bound gap| over the hit
-    AND charge heads drops below ``gap_tol`` on a fixed val batch, or ``max_steps``.
-
-    The hit head is grid-warm-started but a_charge is not (no charge grid), and the
-    winsorized NWJ loss loses its restoring gradient in a once the clip region dominates:
-    calibrating a BEFORE the joint phase makes the clip's validity a guarantee, not a
-    hope. Freezing is done with ``optax.set_to_zero`` on the 'phi' label — the same
-    multi_transform label tree the joint recipe uses. Returns (model, steps_used).
-
-    The CHARGE head is the primary target (it has no grid warm start and starts at a large
-    gap; precal drives it under gap_tol in ~100 steps). The hit head is already
-    grid-warm-started, so under the production ±time augmentation its bound gap sits at a
-    small floor (mean ~0.2, max noisier on sparse high-E strata); the max-over-both gate
-    may therefore run to ``max_steps`` even after the charge head is calibrated — that is
-    the specified cap fallback, and the joint phase (psi at higher LR) continues refining
-    a_hit.
-    """
-    n_val_h = max(int(n_hit_rows * val_fraction), 1)
-    n_val_e = max(int(n_event_rows * val_fraction), 1)
-    key, k_haug, k_hperm, k_cperm = jax.random.split(key, 4)
-    val_hit_rows = _val_rows(n_hit_rows - n_val_h, n_hit_rows, n_val_h, max_val_rows)
-    val_evt_rows = _val_rows(n_event_rows - n_val_e, n_event_rows, n_val_e, max_val_rows)
-    val_hobs, val_hhyp = hit_batch(data, val_hit_rows, k_haug, time_sigma)
-    val_cobs, val_chyp = charge_batch(data, val_evt_rows)
-
-    @eqx.filter_jit
-    def val_fn(model):
-        lh, auxh = nwj_hit_loss(model.hitnet, model.znet, (val_hobs, val_hhyp),
-                                k_hperm, clip_c)
-        lc, auxc = nwj_charge_loss(model.chargenet, model.znet, (val_cobs, val_chyp),
-                                   k_cperm, clip_c)
-        return (lh + w_charge * lc, auxh.gap, auxc.gap, auxh.clip_frac, auxc.clip_frac)
-
-    labels = _labels(model)
-    opt = optax.multi_transform(
-        {"phi": optax.set_to_zero(), "psi": optax.adam(psi_lr)}, labels)
-    opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
-    iota_h = jnp.arange(hit_batch_size, dtype=jnp.int32)
-    iota_c = jnp.arange(charge_batch_size, dtype=jnp.int32)
-
-    @eqx.filter_jit
-    def step(model, opt_state, data, hstart, cstart, key):
-        hrows = jnp.asarray(hstart, jnp.int32) + iota_h
-        crows = jnp.asarray(cstart, jnp.int32) + iota_c
-        k_aug, k_hp, k_cp = jax.random.split(key, 3)
-
-        def loss_fn(m):
-            hobs, hhyp = hit_batch(data, hrows, k_aug, time_sigma)
-            cobs, chyp = charge_batch(data, crows)
-            lh, _ = nwj_hit_loss(m.hitnet, m.znet, (hobs, hhyp), k_hp, clip_c)
-            lc, _ = nwj_charge_loss(m.chargenet, m.znet, (cobs, chyp), k_cp, clip_c)
-            return lh + w_charge * lc
-
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
-        updates, opt_state = opt.update(grads, opt_state)
-        return eqx.apply_updates(model, updates), opt_state, loss
-
-    rng = np.random.default_rng(int(jax.random.randint(key, (), 0, 2**31 - 1)))
-    hit_stream = _window_stream(n_hit_rows - n_val_h, hit_batch_size, rng)
-    chg_stream = _window_stream(n_event_rows - n_val_e, charge_batch_size, rng)
-    t0 = time.time()
-    steps_used = 0
-    for s in range(1, max_steps + 1):
-        key, sk = jax.random.split(key)
-        model, opt_state, _ = step(model, opt_state, data,
-                                   jnp.asarray(next(hit_stream), jnp.int32),
-                                   jnp.asarray(next(chg_stream), jnp.int32), sk)
-        steps_used = s
-        if s % log_every == 0 or s == 1:
-            v, hgap, cgap, hcf, ccf = val_fn(model)
-            hmax = float(np.nanmax(np.abs(np.asarray(hgap))))
-            cmax = float(np.nanmax(np.abs(np.asarray(cgap))))
-            maxgap = max(hmax, cmax)
-            clipf = float(max(float(hcf), float(ccf)))
-            if verbose:
-                print(f"[precal] step {s:5d}  val {float(v):.5f}  maxgap {maxgap:.4g}  "
-                      f"(hit {hmax:.4g} chg {cmax:.4g})  clipf {clipf:.3g}  "
-                      f"({time.time()-t0:.0f}s)", flush=True)
-            if maxgap < gap_tol:
-                if verbose:
-                    print(f"[precal] calibrated: maxgap {maxgap:.4g} < {gap_tol} "
-                          f"at step {s}", flush=True)
-                break
-    return model, steps_used
-
-
-def train_recipe_nwj(
-    model: JointModel,
-    data,
-    n_hit_rows: int,
-    n_event_rows: int,
-    *,
-    key,
-    clip_c: float = CLIP_C,
-    w_charge: float = 1.0,
-    phi_lr: float = 1e-3,
-    psi_lr_mult: float = 3.0,
-    anchor_znet: ZNet = None,
-    mu_anchor: float = 1e-3,
+    n_thetas_z: int = 256,
+    z_chunk: int = 64,
+    lr: float = 1e-3,
     sgd_hit_batch: int = 2**17,
     sgd_charge_batch: int = 2**14,
     sgd_max_steps: int = 400_000,
@@ -491,86 +304,59 @@ def train_recipe_nwj(
     snapshot_every: int = 1,
     extra_val=None,
     verbose: bool = True,
-) -> NwjRecipeResult:
-    """Two-stage (sgd -> cosine) joint NWJ training of {hitnet, znet, chargenet}.
+) -> MleRecipeResult:
+    """Two-stage (sgd -> cosine) exact-MLE training of {hitnet, chargenet}.
 
-    Structure mirrors ``hitman.train.recipe.train_recipe`` (step-based validation with
-    min_delta patience gating, global-best checkpointing, contiguous shuffled windows via
-    ``_window_stream``) but the loss is NWJ, not BCE, and psi (znet) is trained at
-    ``psi_lr_mult`` x the phi learning rate via ``optax.multi_transform`` (default 3x,
-    lowered from 10x: aggressive adam on the normalizer was plausibly co-responsible for
-    the avalanche speed, and precal already does the bulk calibration).
-
-    ``anchor_znet`` (optional, snapshot the znet right after grid init) adds a tiny drift
-    anchor ``mu_anchor * E_matched[(a_hit(theta) - stop_grad(anchor.a_hit(theta)))^2]`` on
-    the HIT head — a belt-and-braces stabilizer against a_hit wandering. It slightly biases
-    a_hit toward the warm-start log Z of the WARM-START f; the bound-gap receipt (not this
-    penalty) remains the arbiter of calibration. Only the hit head is anchored (the charge
-    head has no grid warm start). ``anchor_znet`` is a small module (~100 KB), safe to
-    close over (well under the captured-constants guard).
-
-    Hits and events are streamed as two independent window streams (hits index
-    ``data.n_hits``, events index ``data.n_event``); the last ``val_fraction`` of each is
-    held out. Validation reports the NWJ loss on a FIXED held-out batch plus the per-E
-    stratum bound gap E[e^{f-a}]-1 (max|gap| printed; full hit/charge vectors into
-    history). ``extra_val(model, step) -> dict`` (optional) is merged into each history
-    entry — the driver uses it for the deflation-alarm receipt.
-
-    ``data`` is a CALL-TIME argument that rides the jit tracer; it is never closed over
-    (a closure-captured DeviceData baked ~4 GB of constants into the compiled step and
-    hard-locked the box on 2026-07-19).
+    Per step: a matched hit window + ``n_thetas_z`` random matched thetas -> exact hit
+    ``mle_hit_loss``; a matched charge window + ``n_thetas_z`` random thetas -> exact charge
+    MLE; loss = hit + ``w_charge`` * charge. The grid tensors ride the jit tracer as
+    ARGUMENTS (never closed over — the captured-constants guard stays armed). Validation
+    is the exact-MLE NLL on a FIXED held-out batch (the grid bound gap is identically 0 now
+    — E_grid[e^{f-logZ}] == 1 by construction — so it is dropped); ``extra_val`` still logs
+    the deflation Jhat receipt.
     """
+    h_obs_grid, h_logp_grid = hit_grid
+    c_obs_grid, c_logp_grid = charge_grid
+
     n_val_h = max(int(n_hit_rows * val_fraction), 1)
     n_train_h = n_hit_rows - n_val_h
     n_val_e = max(int(n_event_rows * val_fraction), 1)
     n_train_e = n_event_rows - n_val_e
-
     if checkpoint_dir is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # Fixed held-out validation batch (subsampled to max_val_rows) — built once so the
-    # NWJ yardstick is comparable step to step.
-    def _val_rows(n_train, n_rows, n_val):
-        idx = np.arange(n_train, n_rows, dtype=np.int64)
-        if n_val > max_val_rows:
-            idx = idx[:: n_val // max_val_rows + 1][:max_val_rows]
-        return jnp.asarray(idx, jnp.int32)
-
-    key, k_haug, k_hperm, k_cperm = jax.random.split(key, 4)
-    val_hit_rows = _val_rows(n_train_h, n_hit_rows, n_val_h)
-    val_evt_rows = _val_rows(n_train_e, n_event_rows, n_val_e)
+    key, k_haug, k_zh, k_zc = jax.random.split(key, 4)
+    val_hit_rows = _val_rows(n_train_h, n_hit_rows, n_val_h, max_val_rows)
+    val_evt_rows = _val_rows(n_train_e, n_event_rows, n_val_e, max_val_rows)
     val_hobs, val_hhyp = hit_batch(data, val_hit_rows, k_haug, time_sigma)
     val_cobs, val_chyp = charge_batch(data, val_evt_rows)
+    val_zh = val_hhyp[jax.random.randint(k_zh, (n_thetas_z,), 0, val_hhyp.shape[0])]
+    val_zc = val_chyp[jax.random.randint(k_zc, (n_thetas_z,), 0, val_chyp.shape[0])]
 
     @eqx.filter_jit
-    def val_fn(model):
-        lh, auxh = nwj_hit_loss(model.hitnet, model.znet, (val_hobs, val_hhyp),
-                                k_hperm, clip_c)
-        lc, auxc = nwj_charge_loss(model.chargenet, model.znet, (val_cobs, val_chyp),
-                                   k_cperm, clip_c)
-        return lh + w_charge * lc, auxh.gap, auxc.gap, auxh.clip_frac, auxc.clip_frac
+    def val_fn(model, hgo, hgp, cgo, cgp):
+        lh = mle_hit_loss(model.hitnet, (val_hobs, val_hhyp), val_zh, hgo, hgp, z_chunk)
+        lc = mle_hit_loss(model.chargenet, (val_cobs, val_chyp), val_zc, cgo, cgp, z_chunk)
+        return lh + w_charge * lc
 
     def make_step(opt, hit_bs, chg_bs):
         iota_h = jnp.arange(hit_bs, dtype=jnp.int32)
         iota_c = jnp.arange(chg_bs, dtype=jnp.int32)
 
         @eqx.filter_jit
-        def step(model, opt_state, data, hstart, cstart, key):
+        def step(model, opt_state, data, hstart, cstart, key, hgo, hgp, cgo, cgp):
             hrows = jnp.asarray(hstart, jnp.int32) + iota_h
             crows = jnp.asarray(cstart, jnp.int32) + iota_c
-            k_aug, k_hp, k_cp = jax.random.split(key, 3)
+            k_aug, k_zh_, k_zc_ = jax.random.split(key, 3)
 
             def loss_fn(m):
                 hobs, hhyp = hit_batch(data, hrows, k_aug, time_sigma)
                 cobs, chyp = charge_batch(data, crows)
-                lh, _ = nwj_hit_loss(m.hitnet, m.znet, (hobs, hhyp), k_hp, clip_c)
-                lc, _ = nwj_charge_loss(m.chargenet, m.znet, (cobs, chyp), k_cp, clip_c)
-                loss = lh + w_charge * lc
-                if anchor_znet is not None and mu_anchor > 0:
-                    a_now = jax.vmap(m.znet.a_hit)(hhyp)
-                    a_anc = jax.lax.stop_gradient(jax.vmap(anchor_znet.a_hit)(hhyp))
-                    loss = loss + mu_anchor * jnp.mean((a_now - a_anc) ** 2)
-                return loss
+                zh = hhyp[jax.random.randint(k_zh_, (n_thetas_z,), 0, hit_bs)]
+                zc = chyp[jax.random.randint(k_zc_, (n_thetas_z,), 0, chg_bs)]
+                lh = mle_hit_loss(m.hitnet, (hobs, hhyp), zh, hgo, hgp, z_chunk)
+                lc = mle_hit_loss(m.chargenet, (cobs, chyp), zc, cgo, cgp, z_chunk)
+                return lh + w_charge * lc
 
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
             updates, opt_state = opt.update(grads, opt_state)
@@ -578,7 +364,6 @@ def train_recipe_nwj(
 
         return step
 
-    labels = _labels(model)
     rng = np.random.default_rng(int(jax.random.randint(key, (), 0, 2**31 - 1)))
     best = (np.inf, model, "init", 0)
     history = []
@@ -594,19 +379,15 @@ def train_recipe_nwj(
         t0 = time.time()
         for s in range(1, max_steps + 1):
             key, sk = jax.random.split(key)
-            hstart = jnp.asarray(next(hit_stream), jnp.int32)
-            cstart = jnp.asarray(next(chg_stream), jnp.int32)
             gstep += 1
-            model, opt_state, _ = step_fn(model, opt_state, data, hstart, cstart, sk)
+            model, opt_state, _ = step_fn(
+                model, opt_state, data,
+                jnp.asarray(next(hit_stream), jnp.int32),
+                jnp.asarray(next(chg_stream), jnp.int32), sk,
+                h_obs_grid, h_logp_grid, c_obs_grid, c_logp_grid)
             if s % val_every == 0:
-                v, hgap, cgap, hcf, ccf = val_fn(model)
-                v = float(v)
-                hgap = np.asarray(hgap)
-                cgap = np.asarray(cgap)
-                maxgap = float(np.nanmax(np.abs(hgap)))
-                entry = {"stage": name, "step": s, "nwj": v, "max_hit_gap": maxgap,
-                         "hit_gap": hgap.tolist(), "charge_gap": cgap.tolist(),
-                         "hit_clip_frac": float(hcf), "charge_clip_frac": float(ccf)}
+                v = float(val_fn(model, h_obs_grid, h_logp_grid, c_obs_grid, c_logp_grid))
+                entry = {"stage": name, "step": s, "nll": v}
                 if extra_val is not None:
                     entry.update(extra_val(model, s))
                 history.append(entry)
@@ -621,26 +402,20 @@ def train_recipe_nwj(
                 if v < gate - min_delta:
                     gate, gate_step = v, s
                 if verbose:
-                    print(f"[{name}] step {s:7d}  nwj {v:.5f}  maxgap {maxgap:.4g}  "
-                          f"clipf {float(hcf):.3g}  (best {best[0]:.5f}, "
-                          f"{time.time()-t0:.0f}s)", flush=True)
+                    print(f"[{name}] step {s:7d}  nll {v:.5f}  "
+                          f"(best {best[0]:.5f}, {time.time()-t0:.0f}s)", flush=True)
                 if s - gate_step >= patience_steps:
                     if verbose:
                         print(f"[{name}] value-plateau stop at step {s}", flush=True)
                     break
         return model, key
 
-    sgd_opt = optax.multi_transform(
-        {"phi": optax.adam(phi_lr), "psi": optax.adam(phi_lr * psi_lr_mult)}, labels)
-    model, key = run_stage("sgd", model, sgd_opt, sgd_hit_batch, sgd_charge_batch,
-                           sgd_max_steps, key)
+    model, key = run_stage("sgd", model, optax.adam(lr), sgd_hit_batch,
+                           sgd_charge_batch, sgd_max_steps, key)
     if cosine_steps and cosine_steps > 0:
         sched = optax.cosine_decay_schedule(cosine_peak, cosine_steps, alpha=0.01)
-        cos_opt = optax.multi_transform(
-            {"phi": optax.adam(sched),
-             "psi": optax.adam(lambda c: psi_lr_mult * sched(c))}, labels)
-        model, key = run_stage("cosine", best[1], cos_opt, 2 * sgd_hit_batch,
+        model, key = run_stage("cosine", best[1], optax.adam(sched), 2 * sgd_hit_batch,
                                2 * sgd_charge_batch, cosine_steps, key)
 
-    return NwjRecipeResult(model=best[1], best_val=best[0], best_stage=best[2],
+    return MleRecipeResult(model=best[1], best_val=best[0], best_stage=best[2],
                            best_step=best[3], history=history)
