@@ -223,6 +223,87 @@ class _FakeData:
         self.n_hits = nh
 
 
+# ---------------------------------------------------------------------------
+# v1: NB2 count model + monotone phi(E) yield head
+# ---------------------------------------------------------------------------
+def test_nb2_normalizes_over_N():
+    m = _toy_model()
+    for E, logL in ((jnp.asarray(2.5), jnp.asarray(np.log(60.0))),
+                    (jnp.asarray(9.5), jnp.asarray(np.log(150.0)))):
+        Ns = jnp.arange(0.0, 4000.0)
+        total = float(jnp.sum(jnp.exp(jax.vmap(lambda N: m.log_count(N, logL, E))(Ns))))
+        assert abs(total - 1.0) < 1e-4, f"E={float(E)}: sum_N NB2 = {total}"
+
+
+def test_nb2_matches_scipy():
+    sp = pytest.importorskip("scipy.stats")
+    m = _toy_model()
+    mu = 80.0
+    logL = jnp.asarray(np.log(mu))
+    for E in (2.5, 9.5):
+        r = float(np.exp(float(m.log_dispersion(jnp.asarray(E)))))
+        for N in (0, 37, 120):
+            mine = float(m.log_count(jnp.asarray(float(N)), logL, jnp.asarray(E)))
+            ref = float(sp.nbinom.logpmf(N, r, r / (r + mu)))
+            assert abs(mine - ref) < 1e-3, f"E={E} N={N}: {mine} vs {ref}"
+
+
+def test_nb2_fano_matches_dispersion():
+    m = _toy_model()
+    rng = np.random.default_rng(11)
+    for E, mu in ((2.5, 50.0), (9.5, 130.0)):
+        r = float(np.exp(float(m.log_dispersion(jnp.asarray(E)))))
+        p = r / (r + mu)
+        draws = rng.negative_binomial(r, p, size=400_000)
+        fano_emp = draws.var() / draws.mean()
+        fano_theory = 1.0 + mu / r        # NB2 Fano
+        assert abs(fano_emp - fano_theory) / fano_theory < 0.03, (
+            f"E={E}: emp {fano_emp:.3f} vs theory {fano_theory:.3f}")
+
+
+def test_phi_monotone():
+    # near-flat default and a curve-initialized phi are both non-decreasing in E.
+    pmt_pos, pmt_normal = _toy_geometry()
+    from hitman.splinemle import DEFAULT_PHI_KNOTS
+    phi_init = np.log(np.maximum(np.asarray(DEFAULT_PHI_KNOTS) * 20.0 + 1.0, 0.1))
+    for kw in ({}, {"phi_init_values": phi_init, "phi_anchor": (5.0, np.log(97.7))}):
+        m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, **kw)
+        Eg = jnp.linspace(0.0, 10.0, 400)
+        phig = jax.vmap(m.phi)(Eg)
+        assert bool(jnp.all(jnp.diff(phig) >= -1e-6)), "phi not monotone"
+
+
+def test_phi_cancels_in_softmax():
+    # phi(E) is an E-only additive intensity scale -> softmax(eta + phi) = softmax(eta):
+    # perturbing any phi parameter must leave the sensor factor exactly unchanged.
+    m = _toy_model()
+    theta = jnp.asarray([10.0, 20.0, -30.0, 0.8, 1.0, 5.0, 4.0], jnp.float32)
+    ls0 = jax.vmap(lambda s: m.log_prob_sensor(s, theta))(jnp.arange(241))
+    m2 = eqx.tree_at(lambda mm: mm.phi_e0, m, m.phi_e0 + 3.7)
+    m3 = eqx.tree_at(lambda mm: mm.phi_raw, m, m.phi_raw + 1.0)
+    ls2 = jax.vmap(lambda s: m2.log_prob_sensor(s, theta))(jnp.arange(241))
+    ls3 = jax.vmap(lambda s: m3.log_prob_sensor(s, theta))(jnp.arange(241))
+    assert float(jnp.max(jnp.abs(ls0 - ls2))) == 0.0
+    assert float(jnp.max(jnp.abs(ls0 - ls3))) == 0.0
+
+
+def test_gradient_flows_to_phi_and_disp():
+    m = _toy_model()
+    rng = np.random.default_rng(9)
+    B, P = 6, 20
+    pmt_ids = jnp.asarray(rng.integers(0, 241, size=(B, P)), jnp.int32)
+    theta = jnp.asarray(rng.uniform(0.5, 9.5, size=(B, 7)).astype(np.float32))
+    tg = jax.vmap(lambda ss, th: jax.vmap(
+        lambda s: th[5] + m.n_eff * jnp.linalg.norm(m.pmt_pos[s] - th[:3]) / 299.792458
+    )(ss))(pmt_ids, theta)
+    t = tg + jnp.asarray(rng.uniform(0, 2, size=(B, P)), jnp.float32)
+    mask = jnp.ones((B, P), jnp.float32)
+    (loss, _), g = eqx.filter_value_and_grad(
+        lambda mm: splinemle_loss(mm, (pmt_ids, t, mask, theta)), has_aux=True)(m)
+    assert np.isfinite(float(jnp.sum(g.phi_raw))) and float(jnp.sum(jnp.abs(g.phi_raw))) > 0
+    assert np.isfinite(float(jnp.sum(g.disp))) and float(jnp.sum(jnp.abs(g.disp))) > 0
+
+
 def test_batch_and_preflight():
     store = _FakeStore()
     data = _FakeData(store)

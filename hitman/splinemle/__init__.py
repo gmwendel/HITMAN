@@ -9,6 +9,8 @@ dimension. See ``hitman.splinemle.model`` for the design rationale.
 from hitman.splinemle.model import (
     C_MM_PER_NS,
     DEFAULT_KNOTS,
+    DEFAULT_PHI_KNOTS,
+    E_REF_DISP,
     N_COND_FEATURES,
     SUPPORT_FLOOR,
     SplineMLE,
@@ -30,7 +32,8 @@ from hitman.splinemle.train import (
 )
 
 __all__ = [
-    "SplineMLE", "DEFAULT_KNOTS", "N_COND_FEATURES", "SUPPORT_FLOOR", "C_MM_PER_NS",
+    "SplineMLE", "DEFAULT_KNOTS", "DEFAULT_PHI_KNOTS", "E_REF_DISP",
+    "N_COND_FEATURES", "SUPPORT_FLOOR", "C_MM_PER_NS",
     "log_expm1_over_x", "interval_log_integrals", "logZ_time", "ell_at", "log_prob_u",
     "density_u", "event_terms", "batch_terms", "splinemle_loss",
     "EventSpec", "FitResult", "build_event_spec", "make_event_batch", "fit_splinemle",

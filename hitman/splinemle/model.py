@@ -35,12 +35,23 @@ and the event is a marked Poisson process over sensors:
 * Sensor factor -- exact softmax.  log p_hat(s|theta) = eta_s(theta) - logsumexp_s' eta_s'.
   241 terms, exact.
 
-* Count factor -- marked Poisson process.  mu_s = exp(eta_s), Lambda = sum_s mu_s =
-  exp(logsumexp eta); N ~ Poisson(Lambda). This ties the count and sensor factors to the
-  SAME eta (no separate ChargeNet, no charge grid) and is fully closed form. Note the
-  N*log Lambda terms of the softmax and the Poisson cancel: sensor+count reduces to the
-  canonical sum_i eta_{s_i} - Lambda - log N!. (Over-dispersion is a one-parameter NB2
-  extension -- add a trainable log_r -- deferred; Poisson is the simplest closed form.)
+* Count factor -- NB2 total (v1; ``count_model="nbinom"``).  Clean factorization: the N
+  hits are iid draws from the per-hit density p(s,t|theta), so p(s|hit) = softmax(eta) is
+  UNCHANGED, and the TOTAL count N ~ NB2(mean=Lambda, dispersion r) is a SEPARATE factor
+  (multinomial-given-N x NB2-total). NB2 pmf is analytic:
+      log p(N) = lgamma(N+r) - lgamma(r) - lgamma(N+1) + r log(r/(r+Lambda)) + N log(Lambda/(r+Lambda)),
+  with Var = Lambda + Lambda^2/r, Fano = 1 + Lambda/r (-> Poisson as r->inf). r over-disperses
+  the count -- the v0 Poisson second-moment dishonesty (Bartlett FAIL: g_E^2/(-H_EE) tracked
+  the rising data Fano 3.7->7.4). The log-dispersion is AFFINE in E, ``log r = disp0 +
+  disp1*(E - 5)`` (two trainable scalars), so r tracks the E-dependent Fano.
+      Lambda carries the phi(E) yield head: Lambda = exp(phi(E) + logsumexp eta). phi(E) is
+  a MONOTONE piecewise-linear spline (cumulative-softplus increments; ~8 knots on [0,10]),
+  initialized from the harvested log-yield curve -- the E-concavity the eridge receipt
+  demanded. CRUCIAL: an E-only additive intensity scale CANCELS in softmax(eta + phi(E)) =
+  softmax(eta), so phi(E) touches NEITHER the sensor factor NOR the time factor; it enters
+  the likelihood ONLY through the NB2 mean Lambda. That is exactly where total-yield-vs-E
+  information lives. (v0 was Poisson with phi folded into eta; still available as
+  ``count_model="poisson"``, where the N*log Lambda terms of softmax and Poisson cancel.)
 
 * Conditioner net.  Per (s, theta) a small MLP maps five hypothesis-conditional O(2)
   invariants -- distance d, incidence cos(h.n), direction cos(e.n), Cherenkov cos(e.h), and
@@ -55,6 +66,7 @@ to avoid.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.special import gammaln, logsumexp
 
 from hitman.nn import features as ft
@@ -73,6 +85,10 @@ DEFAULT_KNOTS = (
 )
 
 N_COND_FEATURES = 5
+
+# phi(E) yield-head knots on [0, 10] MeV (8 knots) and the dispersion linearization anchor.
+DEFAULT_PHI_KNOTS = (0.0, 0.75, 1.5, 2.5, 3.5, 5.0, 7.0, 10.0)
+E_REF_DISP = 5.0
 
 # Loss-side finite floor for the log time-density at out-of-support u. The TRUE model has
 # zero density there (log = -inf); on finite data we replace -inf by this finite value so a
@@ -147,6 +163,41 @@ def density_u(u, node_vals, knots):
 # The model
 # ---------------------------------------------------------------------------
 
+def _softplus_inverse(y):
+    """Inverse of softplus for y > 0: log(expm1(y)). Used to seed monotone increments."""
+    return jnp.log(jnp.expm1(jnp.asarray(y, jnp.float32)))
+
+
+def _init_phi_params(phi_knots, phi_init_values, phi_offset, phi_anchor):
+    """Seed (phi_e0, phi_raw) for the monotone phi(E) spline.
+
+    ``phi_init_values`` (K,) are target log-yield log Ybar(E) at ``phi_knots`` (from the
+    harvested curve); if None, phi initializes near-flat (phi == 0). The pre-softplus
+    increments encode the SHAPE/concavity; the absolute level (phi_e0) is degenerate with
+    the eta level and is only a starting point:
+      * ``phi_anchor=(E_a, log_meanN_a)`` centers init logLambda(E_a) ~ log_meanN_a assuming
+        logsumexp(eta_init) ~ log(phi_offset) (the ~241-sensor scale). Preferred.
+      * else phi_e0 = logY(knot0) - log(phi_offset).
+    """
+    K = len(phi_knots)
+    if phi_init_values is None:
+        inc = np.full(K - 1, 1e-4, np.float32)          # near-flat
+        v0 = 0.0
+    else:
+        v = np.asarray(phi_init_values, np.float64)
+        inc = np.maximum(np.diff(v), 1e-3).astype(np.float32)  # positive => monotone init
+        v0 = float(v[0])
+    phi_raw = _softplus_inverse(jnp.asarray(inc, jnp.float32))
+    if phi_anchor is not None:
+        e_a, log_meanN_a = float(phi_anchor[0]), float(phi_anchor[1])
+        cum = np.concatenate([[0.0], np.cumsum(inc)])   # phi shape relative to phi_e0
+        cum_at_a = float(np.interp(e_a, np.asarray(phi_knots, float), cum))
+        phi_e0 = log_meanN_a - np.log(phi_offset) - cum_at_a
+    else:
+        phi_e0 = v0 - np.log(phi_offset)
+    return jnp.asarray(phi_e0, jnp.float32), phi_raw
+
+
 class _CondMLP(eqx.Module):
     """Plain MLP with a linear VECTOR head and a STATIC activation name.
 
@@ -187,22 +238,34 @@ class SplineMLE(eqx.Module):
     mlp: _CondMLP
     pmt_pos: jnp.ndarray
     pmt_normal: jnp.ndarray
+    phi_e0: jnp.ndarray            # base of the monotone phi(E) yield spline
+    phi_raw: jnp.ndarray           # (K_phi-1,) pre-softplus increments (monotone param)
+    disp: jnp.ndarray              # (2,) affine log-dispersion in E: [disp0, disp1]
     knots: tuple = eqx.field(static=True)
+    phi_knots: tuple = eqx.field(static=True)
     count_model: str = eqx.field(static=True)
 
     def __init__(self, pmt_pos, pmt_normal, *, key, knots=DEFAULT_KNOTS, width: int = 192,
                  depth: int = 3, n_eff_init: float = 1.40, activation: str = "mish",
-                 count_model: str = "poisson"):
+                 count_model: str = "nbinom", phi_knots=DEFAULT_PHI_KNOTS,
+                 phi_init_values=None, phi_offset: float = 241.0, phi_anchor=None,
+                 disp_init=(3.5, 0.15)):
         self.knots = tuple(float(k) for k in knots)
+        self.phi_knots = tuple(float(k) for k in phi_knots)
         self.log_n_eff = jnp.log(jnp.asarray(n_eff_init, jnp.float32))
         n_nodes = len(self.knots)
         self.mlp = _CondMLP(N_COND_FEATURES, n_nodes + 1, width, depth,
                             activation=activation, key=key)
         self.pmt_pos = jnp.asarray(pmt_pos, jnp.float32)
         self.pmt_normal = jnp.asarray(pmt_normal, jnp.float32)
-        if count_model != "poisson":
-            raise ValueError(f"unsupported count_model {count_model!r} (only 'poisson')")
+        if count_model not in ("poisson", "nbinom"):
+            raise ValueError(f"unsupported count_model {count_model!r}")
         self.count_model = count_model
+        phi_e0, phi_raw = _init_phi_params(self.phi_knots, phi_init_values, phi_offset,
+                                           phi_anchor)
+        self.phi_e0 = phi_e0
+        self.phi_raw = phi_raw
+        self.disp = jnp.asarray(disp_init, jnp.float32)
 
     @property
     def n_eff(self) -> jnp.ndarray:
@@ -211,6 +274,24 @@ class SplineMLE(eqx.Module):
     @property
     def knots_arr(self) -> jnp.ndarray:
         return jnp.asarray(self.knots, jnp.float32)
+
+    @property
+    def phi_knots_arr(self) -> jnp.ndarray:
+        return jnp.asarray(self.phi_knots, jnp.float32)
+
+    @property
+    def phi_values(self) -> jnp.ndarray:
+        """Monotone (non-decreasing) knot values: phi_e0 + cumulative softplus increments."""
+        inc = jax.nn.softplus(self.phi_raw)
+        return self.phi_e0 + jnp.concatenate([jnp.zeros(1, inc.dtype), jnp.cumsum(inc)])
+
+    def phi(self, E):
+        """Monotone piecewise-linear log-yield scale phi(E). Lives ONLY in the count mean."""
+        return jnp.interp(E, self.phi_knots_arr, self.phi_values)
+
+    def log_dispersion(self, E):
+        """Affine log-dispersion log r(E) = disp0 + disp1 (E - E_REF); r -> inf is Poisson."""
+        return self.disp[0] + self.disp[1] * (E - E_REF_DISP)
 
     # -- geometry / conditioner ------------------------------------------------
     def _sensor_features(self, pos, nrm, theta):
@@ -274,6 +355,16 @@ class SplineMLE(eqx.Module):
         lt = log_prob_u(t - t_geo[pmt_id], nodes[pmt_id], self.knots_arr, floor)
         return ls + lt
 
-    def log_count(self, N, log_Lambda):
-        """log Pois(N | Lambda) with log_Lambda = logsumexp(eta) (marked-Poisson tie)."""
-        return N * log_Lambda - jnp.exp(log_Lambda) - gammaln(N + 1.0)
+    def log_count(self, N, log_Lambda, E):
+        """log p(N | theta). ``log_Lambda`` = phi(E) + logsumexp(eta) is the log mean count.
+
+        NB2 (default): mean Lambda, size r = exp(log_dispersion(E)); Fano = 1 + Lambda/r.
+        Poisson (``count_model='poisson'``): the v0 marked-Poisson tie.
+        """
+        if self.count_model == "poisson":
+            return N * log_Lambda - jnp.exp(log_Lambda) - gammaln(N + 1.0)
+        log_r = self.log_dispersion(E)
+        r = jnp.exp(log_r)
+        log_r_plus_mu = jnp.logaddexp(log_r, log_Lambda)  # log(r + Lambda), stable
+        return (gammaln(N + r) - gammaln(r) - gammaln(N + 1.0)
+                + r * (log_r - log_r_plus_mu) + N * (log_Lambda - log_r_plus_mu))
