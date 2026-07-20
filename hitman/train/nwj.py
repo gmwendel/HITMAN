@@ -71,12 +71,14 @@ from hitman.nn.mlp import MLP
 from hitman.train.recipe import _window_stream
 from hitman.train.resident import charge_batch, hit_batch
 
-# Winsorization constant: clamp (f - a) at +CLIP_C inside the shuffled exp. log(100)
-# caps a single mis-normalized shuffled row's contribution to the exp mean at 100x the
-# calibrated value, taming the heavy right tail of e^{f-a} early in training (when a is
-# far from log Z) without biasing the optimum: at the optimum f - a = log r on shuffled
-# (independent) pairs, whose exp has mean 1 and rarely exceeds 100, so the clip is
-# inactive there (verified by the bound-gap toy). Static, never a trained quantity.
+# Knee of the linearly-extended exponential ``soft_exp`` used in the shuffled term. Beyond
+# u = f - a = CLIP_C the exp grows LINEARLY (slope exp(c)) instead of exponentially, which
+# tames the heavy right tail of e^{f-a} early in training (a far from log Z) without a
+# hard clamp's zero-gradient flat region. log(100): a single mis-normalized row past the
+# knee contributes ~100x the calibrated value plus a bounded-slope linear term. At the
+# optimum f - a = log r on shuffled (independent) pairs, whose exp has mean 1 and rarely
+# exceeds 100, so the extension is inactive there (bound-gap toy). Static, never trained.
+# NOTE: a hard clamp here caused the A3 joint-phase avalanche (a -> -inf); see soft_exp.
 CLIP_C = float(np.log(100.0))
 
 # Pre-calibration clip. The WINSORIZED loss (CLIP_C) is unbounded below in a: once f-a
@@ -147,11 +149,11 @@ class ZNet(eqx.Module):
 class NWJAux(NamedTuple):
     """Diagnostics for a NWJ loss evaluation (not differentiated).
 
-    ``gap`` (N_STRATA,) is the per-1-MeV-E-stratum bound gap E_shuffled[e^{f-a}] - 1
-    (winsorized exactly as the loss uses it), with nan for empty strata; it -> 0 in every
-    stratum at the calibrated optimum. ``clip_frac`` is the fraction of shuffled rows on
-    which the winsorization clip is active — a receipt that the clip bias vanishes once a
-    is calibrated (clip_frac -> ~0).
+    ``gap`` (N_STRATA,) is the per-1-MeV-E-stratum bound gap E_shuffled[soft_exp(f-a)] - 1
+    (using the same linearly-extended exp the loss uses), with nan for empty strata; it
+    -> 0 in every stratum at the calibrated optimum. ``clip_frac`` is the fraction of
+    shuffled rows BEYOND the knee c (f-a > c, i.e. in the linear-tail region) — a receipt
+    that the tail extension is inactive once a is calibrated (clip_frac -> ~0).
     """
 
     gap: jnp.ndarray        # (N_STRATA,)
@@ -166,15 +168,33 @@ def _stratum_gap(ex: jnp.ndarray, e: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(cnts > 0, sums / jnp.maximum(cnts, 1.0) - 1.0, jnp.nan)
 
 
+def soft_exp(u, c):
+    """Linearly-extended exponential: exp(u) for u <= c, else exp(c)*(1 + (u - c)).
+
+    Monotone, convex, C^1 (value and slope match exp at u=c), and Lipschitz beyond c
+    (slope pinned at exp(c) = the tail is LINEAR, not exponential). Crucially its
+    derivative NEVER vanishes (exp(c) > 0 in the tail), so the restoring gradient on the
+    normalizer a survives even when f-a is deep beyond c. The hard clamp min(u,c) has a
+    ZERO-gradient flat region beyond c: there the shuffled term's pull on a disappears
+    while the matched term keeps pushing a down, so the clipped fraction avalanches to full
+    saturation and a -> -inf (the joint-phase divergence at A3 step ~4000). Replacing the
+    clamp with this extension removes that mode by construction while keeping the
+    heavy-tail variance guard (linear, not exponential, tail growth). The masked exp uses
+    min(u,c) only to avoid overflow in the unused branch of ``where``.
+    """
+    return jnp.where(u <= c, jnp.exp(jnp.minimum(u, c)),
+                     jnp.exp(c) * (1.0 + (u - c)))
+
+
 def _nwj_loss(f_m, a_m, f_s, a_s, e_s, clip_c):
     """Core NWJ loss from matched/shuffled critic values; shared by hit and charge.
 
     ``f_m, a_m`` matched critic parts; ``f_s, a_s`` shuffled; ``e_s`` shuffled true E for
-    the stratified bound-gap aux. Returns (loss, NWJAux).
+    the stratified bound-gap aux. The shuffled term uses the linearly-extended exponential
+    ``soft_exp`` (see its docstring) at knee ``clip_c``. Returns (loss, NWJAux).
     """
     d_s = f_s - a_s
-    d_s_clip = jnp.minimum(d_s, clip_c)
-    ex = jnp.exp(d_s_clip)
+    ex = soft_exp(d_s, clip_c)
     matched = jnp.mean(f_m - a_m)
     shuffled = jnp.mean(ex)
     loss = -matched + shuffled - 1.0
@@ -453,7 +473,9 @@ def train_recipe_nwj(
     clip_c: float = CLIP_C,
     w_charge: float = 1.0,
     phi_lr: float = 1e-3,
-    psi_lr_mult: float = 10.0,
+    psi_lr_mult: float = 3.0,
+    anchor_znet: ZNet = None,
+    mu_anchor: float = 1e-3,
     sgd_hit_batch: int = 2**17,
     sgd_charge_batch: int = 2**14,
     sgd_max_steps: int = 400_000,
@@ -475,7 +497,17 @@ def train_recipe_nwj(
     Structure mirrors ``hitman.train.recipe.train_recipe`` (step-based validation with
     min_delta patience gating, global-best checkpointing, contiguous shuffled windows via
     ``_window_stream``) but the loss is NWJ, not BCE, and psi (znet) is trained at
-    ``psi_lr_mult`` x the phi learning rate via ``optax.multi_transform``.
+    ``psi_lr_mult`` x the phi learning rate via ``optax.multi_transform`` (default 3x,
+    lowered from 10x: aggressive adam on the normalizer was plausibly co-responsible for
+    the avalanche speed, and precal already does the bulk calibration).
+
+    ``anchor_znet`` (optional, snapshot the znet right after grid init) adds a tiny drift
+    anchor ``mu_anchor * E_matched[(a_hit(theta) - stop_grad(anchor.a_hit(theta)))^2]`` on
+    the HIT head — a belt-and-braces stabilizer against a_hit wandering. It slightly biases
+    a_hit toward the warm-start log Z of the WARM-START f; the bound-gap receipt (not this
+    penalty) remains the arbiter of calibration. Only the hit head is anchored (the charge
+    head has no grid warm start). ``anchor_znet`` is a small module (~100 KB), safe to
+    close over (well under the captured-constants guard).
 
     Hits and events are streamed as two independent window streams (hits index
     ``data.n_hits``, events index ``data.n_event``); the last ``val_fraction`` of each is
@@ -533,7 +565,12 @@ def train_recipe_nwj(
                 cobs, chyp = charge_batch(data, crows)
                 lh, _ = nwj_hit_loss(m.hitnet, m.znet, (hobs, hhyp), k_hp, clip_c)
                 lc, _ = nwj_charge_loss(m.chargenet, m.znet, (cobs, chyp), k_cp, clip_c)
-                return lh + w_charge * lc
+                loss = lh + w_charge * lc
+                if anchor_znet is not None and mu_anchor > 0:
+                    a_now = jax.vmap(m.znet.a_hit)(hhyp)
+                    a_anc = jax.lax.stop_gradient(jax.vmap(anchor_znet.a_hit)(hhyp))
+                    loss = loss + mu_anchor * jnp.mean((a_now - a_anc) ** 2)
+                return loss
 
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
             updates, opt_state = opt.update(grads, opt_state)

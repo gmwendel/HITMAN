@@ -21,7 +21,7 @@ import optax
 import pytest
 from jax.scipy.stats import norm
 
-from hitman.train.nwj import (CLIP_C, N_STRATA, ZNet, nwj_hit_loss)
+from hitman.train.nwj import (CLIP_C, N_STRATA, ZNet, nwj_hit_loss, soft_exp)
 
 # Time/charge resolutions are deliberately broad relative to the t0 spread and E range:
 # the per-hit ratio e^f is then light-tailed, so at the calibrated optimum e^{f-a} on
@@ -255,3 +255,69 @@ def test_bound_gap_converges_and_clip_inactive():
     # at the calibrated optimum the winsorization clip touches < 0.1% of shuffled rows:
     # the clip bias vanishes because it is (essentially) never engaged.
     assert np.mean(clip_fracs) < 1e-3, f"clip not inactive at optimum: {np.mean(clip_fracs):.4g}"
+
+
+# ---------------------------------------------------------------------------
+# Test 4: linearly-extended exp recovers from the saturated regime (A3 avalanche fix)
+# ---------------------------------------------------------------------------
+
+def test_linear_tail_recovers_from_saturation():
+    """Starting deep in the tail (a offset far below log Z so f-a > c for ~all rows), the
+    linearly-extended exp keeps a nonzero restoring gradient and RECOVERS (gap -> <0.1, no
+    divergence), whereas the hard clamp's gradient vanishes there and would drive a further
+    down (the A3 joint-phase avalanche)."""
+    exact = ExactNet()
+    znet = ZNet(width=64, depth=3, key=jax.random.PRNGKey(5))
+    # push a_hit far below log Z (=~0), so u = f - a is large-positive (saturated regime)
+    OFF = 5.0
+    znet = eqx.tree_at(lambda z: z.hit_mlp.layers[-1].bias, znet,
+                       znet.hit_mlp.layers[-1].bias - OFF)
+
+    kb, kp = jax.random.split(jax.random.PRNGKey(0))
+    obs, hyp = gen_hit_batch(kb, 4000)
+    _, aux0 = nwj_hit_loss(exact, znet, (obs, hyp), kp, CLIP_C)
+    # deeply saturated start: the shuffled term is tail-dominated (gap >> 1) with a large
+    # fraction of rows beyond the knee. ("100% beyond c" is unreachable — mismatched pairs
+    # have a heavy negative f_s tail — but the loss lives in the linear-tail regime.)
+    assert np.nanmax(np.abs(np.asarray(aux0.gap))) > 20.0, "start not saturated (gap small)"
+    assert float(aux0.clip_frac) > 0.2, f"start not saturated: clip_frac={float(aux0.clip_frac)}"
+
+    # Inline receipt (fully-saturated limit, evaluated directly on u = f-a > c so it is
+    # independent of the toy's f_s tail): dL/da = +1 (matched) + d/da[shuffled]. For the
+    # HARD clamp the tail is flat -> shuffled gradient 0 -> dL/da = +1 > 0, i.e. descent
+    # DRIVES a DOWN -> deeper saturation -> the A3 avalanche. For the linear extension the
+    # tail slope is exp(c) -> dL/da = 1 - exp(c) < 0, i.e. descent RAISES a -> recovery.
+    u = jnp.full((2000,), CLIP_C + 5.0)
+    g_soft = 1.0 + float(jax.grad(lambda da: jnp.mean(soft_exp(u - da, CLIP_C)))(0.0))
+    g_hard = 1.0 + float(jax.grad(
+        lambda da: jnp.mean(jnp.exp(jnp.minimum(u - da, CLIP_C))))(0.0))
+    assert g_hard > 0.0, f"hard clamp: dL/da should be +1 (divergent), got {g_hard:.3f}"
+    assert g_soft < 0.0, f"soft exp: dL/da should be <0 (recovery), got {g_soft:.3f}"
+
+    # The linearly-extended exp RECOVERS from the saturated start to calibration.
+    opt = optax.adam(1.5e-2)
+    opt_state = opt.init(eqx.filter(znet, eqx.is_inexact_array))
+
+    @eqx.filter_jit
+    def step(znet, opt_state, batch, key):
+        loss, grads = eqx.filter_value_and_grad(
+            lambda z: nwj_hit_loss(exact, z, batch, key, CLIP_C)[0])(znet)
+        updates, opt_state = opt.update(grads, opt_state)
+        return eqx.apply_updates(znet, updates), opt_state, loss
+
+    key = jax.random.PRNGKey(7)
+    last = np.inf
+    for _ in range(2500):
+        key, kb2, kp2 = jax.random.split(key, 3)
+        znet, opt_state, last = step(znet, opt_state, gen_hit_batch(kb2, 1500), kp2)
+    assert np.isfinite(float(last)), "soft loss diverged (non-finite)"
+    # average the gap over a few batches (high-E strata are sparse -> per-batch noisy).
+    gaps, cfs = [], []
+    for i in range(6):
+        kb2, kp2 = jax.random.split(jax.random.PRNGKey(4243 + i))
+        _, aux1 = nwj_hit_loss(exact, znet, gen_hit_batch(kb2, 10000), kp2, CLIP_C)
+        gaps.append(np.asarray(aux1.gap))
+        cfs.append(float(aux1.clip_frac))
+    gap = np.nanmean(np.stack(gaps), axis=0)
+    assert np.nanmax(np.abs(gap)) < 0.1, f"did not recover to calibration: {gap}"
+    assert np.mean(cfs) < 1e-2, f"still saturated after recovery: {np.mean(cfs)}"
