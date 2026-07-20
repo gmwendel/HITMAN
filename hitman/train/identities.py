@@ -193,6 +193,20 @@ class GmmCfg(NamedTuple):
     n_splits: int = 1     # average Q over this many independent half-splits: the
                           # moment vectors (the expensive part) are computed once, so
                           # extra splits cut the split-noise gradient variance ~free
+    pos_edges: jnp.ndarray = None  # optional wall-coordinate edges (K_pos+1,): cells
+                          # become (E-bin x wall-bin) product instruments — E-only
+                          # strata cannot see position-conditional violations (the
+                          # run16 e6_r700 wall damage was invisible to them)
+
+
+# wall-proximity coordinate: max of normalized radius / normalized |z| over the
+# 5M-store generation volume (rho_max 889 mm, |z|_max 924 mm)
+_RHO_MAX, _Z_MAX = 889.0, 924.0
+
+
+def wall_coord(theta):
+    rho = jnp.hypot(theta[..., 0], theta[..., 1])
+    return jnp.maximum(rho / _RHO_MAX, jnp.abs(theta[..., 2]) / _Z_MAX)
 
 
 class StratifiedSpec(NamedTuple):
@@ -204,14 +218,23 @@ class StratifiedSpec(NamedTuple):
 
 
 def build_stratified_spec(store, n_pad: int, edges, lo: int = 0,
-                          hi: int = None) -> StratifiedSpec:
+                          hi: int = None, pos_edges=None) -> StratifiedSpec:
+    """Eligibility tables per stratum; with ``pos_edges`` the strata are the
+    (E-bin x wall-bin) product cells, indexed k_E * K_pos + k_pos."""
     hi = store.n_events if hi is None else hi
     nhit = np.diff(store.hit_offsets[lo : hi + 1])
-    e = np.asarray(store.hyp[lo:hi, 6])
+    h = np.asarray(store.hyp[lo:hi])
+    e = h[:, 6]
     k = np.clip(np.digitize(e, edges) - 1, 0, len(edges) - 2)
+    if pos_edges is not None:
+        w = np.maximum(np.hypot(h[:, 0], h[:, 1]) / _RHO_MAX,
+                       np.abs(h[:, 2]) / _Z_MAX)
+        kp = np.clip(np.digitize(w, pos_edges) - 1, 0, len(pos_edges) - 2)
+        k = k * (len(pos_edges) - 1) + kp
+    n_cells = (len(edges) - 1) * (1 if pos_edges is None else len(pos_edges) - 1)
     fits = nhit <= n_pad
     rows, counts = [], []
-    for kk in range(len(edges) - 1):
+    for kk in range(n_cells):
         ids = lo + np.flatnonzero(fits & (k == kk))
         counts.append(len(ids))
         rows.append(ids)
@@ -283,7 +306,12 @@ def gmm_moment_penalty(hitnet, chargenet, batch, cfg: GmmCfg, key) -> jnp.ndarra
     mv = mv.reshape(nc * ch, -1)                                # (N, M)
     theta = theta[: nc * ch]
     K = cfg.W.shape[0]
-    k = jnp.clip(jnp.searchsorted(cfg.edges, theta[:, 6]) - 1, 0, K - 1)
+    k = jnp.clip(jnp.searchsorted(cfg.edges, theta[:, 6]) - 1,
+                 0, cfg.edges.shape[0] - 2)
+    if cfg.pos_edges is not None:
+        kp = jnp.clip(jnp.searchsorted(cfg.pos_edges, wall_coord(theta)) - 1,
+                      0, cfg.pos_edges.shape[0] - 2)
+        k = k * (cfg.pos_edges.shape[0] - 1) + kp
     mv = jnp.clip(mv, -cfg.bounds[k], cfg.bounds[k])
 
     def one_split(sk):
