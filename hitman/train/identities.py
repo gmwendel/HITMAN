@@ -189,6 +189,10 @@ class GmmCfg(NamedTuple):
     n_pad: int = 320
     time_sigma: float = 50.0
     min_half: int = 8
+    n_chunk: int = 4      # sequential lax.map chunks: bounds 3rd-order-AD memory
+    n_splits: int = 1     # average Q over this many independent half-splits: the
+                          # moment vectors (the expensive part) are computed once, so
+                          # extra splits cut the split-noise gradient variance ~free
 
 
 class StratifiedSpec(NamedTuple):
@@ -254,6 +258,10 @@ def gmm_moment_penalty(hitnet, chargenet, batch, cfg: GmmCfg, key) -> jnp.ndarra
         raise NotImplementedError("GMM identity batches carry xyzt hit rows")
     hits, mask, charge, theta = batch
 
+    # remat: training differentiates THROUGH these per-event Hessians (3rd-order AD);
+    # without checkpointing the vmap stores every event's Hessian graph and OOMs the
+    # GPU (run14 first launch, 2026-07-19). Recompute-in-backward is ~1.3x compute.
+    @jax.checkpoint
     def one(h, m, c, th):
         def ll(t):
             return jnp.sum(jax.vmap(lambda hh: hitnet(hh, t))(h) * m) + chargenet(c, t)
@@ -262,20 +270,34 @@ def gmm_moment_penalty(hitnet, chargenet, batch, cfg: GmmCfg, key) -> jnp.ndarra
         H = jax.hessian(ll)(th)
         return lean_vector(g, H, th)
 
-    mv = jax.vmap(one)(hits, mask, charge, theta)               # (N, M)
+    # sequential chunks: peak memory = one chunk's Hessian graphs, not the batch's
+    n = theta.shape[0]
+    nc = max(1, min(cfg.n_chunk, n))
+    ch = n // nc
+    def _chunk(c):
+        return jax.vmap(one)(*c)
+    mv = jax.lax.map(_chunk, (hits[: nc * ch].reshape(nc, ch, *hits.shape[1:]),
+                              mask[: nc * ch].reshape(nc, ch, *mask.shape[1:]),
+                              charge[: nc * ch].reshape(nc, ch, *charge.shape[1:]),
+                              theta[: nc * ch].reshape(nc, ch, *theta.shape[1:])))
+    mv = mv.reshape(nc * ch, -1)                                # (N, M)
+    theta = theta[: nc * ch]
     K = cfg.W.shape[0]
     k = jnp.clip(jnp.searchsorted(cfg.edges, theta[:, 6]) - 1, 0, K - 1)
     mv = jnp.clip(mv, -cfg.bounds[k], cfg.bounds[k])
-    half = jax.random.bernoulli(key, 0.5, (mv.shape[0],))
-    seg = k * 2 + half.astype(jnp.int32)
-    sums = jax.ops.segment_sum(mv, seg, num_segments=2 * K)
-    cnts = jax.ops.segment_sum(jnp.ones_like(seg, jnp.float32), seg,
-                               num_segments=2 * K)
-    means = sums / jnp.maximum(cnts, 1.0)[:, None]
-    m_a, m_b = means[0::2], means[1::2]                          # (K, M)
-    valid = (jnp.minimum(cnts[0::2], cnts[1::2]) >= cfg.min_half).astype(jnp.float32)
-    q_k = jnp.einsum("ki,kij,kj->k", m_a, cfg.W, m_b)
-    return jnp.sum(valid * q_k)
+
+    def one_split(sk):
+        half = jax.random.bernoulli(sk, 0.5, (mv.shape[0],))
+        seg = k * 2 + half.astype(jnp.int32)
+        sums = jax.ops.segment_sum(mv, seg, num_segments=2 * K)
+        cnts = jax.ops.segment_sum(jnp.ones_like(seg, jnp.float32), seg,
+                                   num_segments=2 * K)
+        means = sums / jnp.maximum(cnts, 1.0)[:, None]
+        m_a, m_b = means[0::2], means[1::2]                      # (K, M)
+        valid = (jnp.minimum(cnts[0::2], cnts[1::2]) >= cfg.min_half).astype(jnp.float32)
+        return jnp.sum(valid * jnp.einsum("ki,kij,kj->k", m_a, cfg.W, m_b))
+
+    return jnp.mean(jax.vmap(one_split)(jax.random.split(key, cfg.n_splits)))
 
 
 def make_gmm_loss(chargenet, spec: StratifiedSpec, cfg: GmmCfg) -> Callable:

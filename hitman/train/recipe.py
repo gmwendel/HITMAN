@@ -95,6 +95,13 @@ def train_recipe(
         obs, hyp, w = _unpack_batch(make_batch(data, rows, k_aug))
         return _batch_loss(model, obs, hyp, k_loss, balance_weight, w)
 
+    if extra_loss is not None:
+        # fixed key -> fixed identity batch + splits: a deterministic penalty
+        # yardstick per val point (reported alongside BCE, still not part of it)
+        @eqx.filter_jit
+        def val_pen(model, data, key, step):
+            return extra_loss(model, data, key, step)
+
     def make_step(optimizer, batch_size):
         iota = jnp.arange(batch_size, dtype=jnp.int32)
 
@@ -139,7 +146,10 @@ def train_recipe(
                                           jnp.asarray(gstep, jnp.float32))
             if s % val_every == 0:
                 v = float(val_bce(model, data, val_rows, val_key))
-                history.append((name, s, v))
+                pen = (float(val_pen(model, data, val_key,
+                                     jnp.asarray(gstep, jnp.float32)))
+                       if extra_loss is not None else None)
+                history.append((name, s, v) if pen is None else (name, s, v, pen))
                 if v < best[0]:
                     best = (v, model, name, s)
                     if checkpoint_dir is not None:
@@ -153,7 +163,8 @@ def train_recipe(
                 if v < gate - min_delta:
                     gate, gate_step = v, s
                 if verbose:
-                    print(f"[{name}] step {s:7d}  val {v:.5f}  "
+                    extra_txt = "" if pen is None else f"  pen {pen:.4g}"
+                    print(f"[{name}] step {s:7d}  val {v:.5f}{extra_txt}  "
                           f"(best {best[0]:.5f}, {time.time()-t0:.0f}s)", flush=True)
                 if s - gate_step >= patience_steps:
                     if verbose:
