@@ -99,8 +99,14 @@ def grid_logZ(net, thetas, grid_obs, grid_logp, chunk: int = 64):
     pad = nc * chunk - M
     th = thetas if pad == 0 else jnp.concatenate(
         [thetas, jnp.broadcast_to(thetas[:1], (pad, thetas.shape[1]))], axis=0)
-    out = jax.lax.map(lambda tc: jax.vmap(one)(tc),
-                      th.reshape(nc, chunk, thetas.shape[1])).reshape(-1)
+    # jax.checkpoint on the CHUNK BODY is load-bearing: lax.map lowers to a scan whose
+    # reverse-mode pass otherwise STACKS every chunk's forward activations
+    # (M x grid x width x mish-temps), so chunking the forward does NOT chunk the backward
+    # — the unchunked cross-product then materializes (637 GiB at 256 thetas x 170k cells x
+    # width-256 killed the A3 launch). Remat makes the scan store only each chunk's inputs
+    # and recompute its grid-forward in backward, bounding peak to ONE z_chunk.
+    body = jax.checkpoint(lambda tc: jax.vmap(one)(tc))
+    out = jax.lax.map(body, th.reshape(nc, chunk, thetas.shape[1])).reshape(-1)
     return out[:M]
 
 
@@ -269,6 +275,74 @@ class MleRecipeResult:
     history: list = field(default_factory=list)
 
 
+def joint_mle_loss(model, data, hrows, crows, key, hit_grid, charge_grid,
+                   n_thetas_z, z_chunk, w_charge=1.0, time_sigma=50.0):
+    """Exact-MLE loss for one step: hit + w_charge * charge, on matched windows ``hrows``
+    (hits) / ``crows`` (events) with ``n_thetas_z`` random matched thetas each. Shared by
+    the training step and the ``step_max_intermediate_gib`` audit so both trace the SAME
+    graph. ``data`` and the grids ride the tracer as arguments (never closed over)."""
+    hgo, hgp = hit_grid
+    cgo, cgp = charge_grid
+    k_aug, k_zh, k_zc = jax.random.split(key, 3)
+    hobs, hhyp = hit_batch(data, hrows, k_aug, time_sigma)
+    cobs, chyp = charge_batch(data, crows)
+    zh = hhyp[jax.random.randint(k_zh, (n_thetas_z,), 0, hrows.shape[0])]
+    zc = chyp[jax.random.randint(k_zc, (n_thetas_z,), 0, crows.shape[0])]
+    lh = mle_hit_loss(model.hitnet, (hobs, hhyp), zh, hgo, hgp, z_chunk)
+    lc = mle_hit_loss(model.chargenet, (cobs, chyp), zc, cgo, cgp, z_chunk)
+    return lh + w_charge * lc
+
+
+def _iter_subjaxprs(x):
+    """Yield nested jaxprs held in an eqn param (scan/while/pjit/cond bodies). Duck-typed
+    so it survives jax version churn (ClosedJaxpr has ``.jaxpr``; Jaxpr has ``.eqns``)."""
+    if hasattr(x, "eqns"):                       # a Jaxpr
+        yield x
+    elif hasattr(x, "jaxpr") and hasattr(getattr(x, "jaxpr"), "eqns"):  # a ClosedJaxpr
+        yield x.jaxpr
+    elif isinstance(x, (list, tuple)):
+        for y in x:
+            yield from _iter_subjaxprs(y)
+
+
+def _jaxpr_max_bytes(jaxpr):
+    """Largest single intermediate tensor (bytes) produced anywhere in ``jaxpr``, including
+    inside scan/map/cond bodies. Pure static analysis — allocates nothing."""
+    import math
+    m = 0
+    for eqn in jaxpr.eqns:
+        for ov in eqn.outvars:
+            av = getattr(ov, "aval", None)
+            if av is not None and hasattr(av, "shape") and hasattr(av, "dtype"):
+                try:
+                    m = max(m, math.prod(av.shape) * av.dtype.itemsize)
+                except (TypeError, AttributeError):
+                    pass
+        for p in eqn.params.values():
+            for sub in _iter_subjaxprs(p):
+                m = max(m, _jaxpr_max_bytes(sub))
+    return m
+
+
+def step_max_intermediate_gib(model, data, hit_grid, charge_grid, *, hit_bs, chg_bs,
+                              n_thetas_z, z_chunk, w_charge=1.0, time_sigma=50.0,
+                              key=None):
+    """Static audit: largest intermediate tensor (GiB) in the value_and_grad training step
+    at the EXACT given config, via ``jax.make_jaxpr`` (traces abstractly — no allocation,
+    CPU-safe). Turns the OOM class of failure into a 5-second pre-flight check."""
+    if key is None:
+        key = jax.random.PRNGKey(0)
+    hrows = jnp.zeros(hit_bs, jnp.int32)
+    crows = jnp.zeros(chg_bs, jnp.int32)
+
+    def loss(m):
+        return joint_mle_loss(m, data, hrows, crows, key, hit_grid, charge_grid,
+                              n_thetas_z, z_chunk, w_charge, time_sigma)
+
+    jaxpr = jax.make_jaxpr(eqx.filter_grad(loss))(model)
+    return _jaxpr_max_bytes(jaxpr.jaxpr) / 2**30
+
+
 def _val_rows(n_train, n_rows, n_val, max_val_rows):
     idx = np.arange(n_train, n_rows, dtype=np.int64)
     if n_val > max_val_rows:
@@ -347,16 +421,10 @@ def train_recipe_mle(
         def step(model, opt_state, data, hstart, cstart, key, hgo, hgp, cgo, cgp):
             hrows = jnp.asarray(hstart, jnp.int32) + iota_h
             crows = jnp.asarray(cstart, jnp.int32) + iota_c
-            k_aug, k_zh_, k_zc_ = jax.random.split(key, 3)
 
             def loss_fn(m):
-                hobs, hhyp = hit_batch(data, hrows, k_aug, time_sigma)
-                cobs, chyp = charge_batch(data, crows)
-                zh = hhyp[jax.random.randint(k_zh_, (n_thetas_z,), 0, hit_bs)]
-                zc = chyp[jax.random.randint(k_zc_, (n_thetas_z,), 0, chg_bs)]
-                lh = mle_hit_loss(m.hitnet, (hobs, hhyp), zh, hgo, hgp, z_chunk)
-                lc = mle_hit_loss(m.chargenet, (cobs, chyp), zc, cgo, cgp, z_chunk)
-                return lh + w_charge * lc
+                return joint_mle_loss(m, data, hrows, crows, key, (hgo, hgp), (cgo, cgp),
+                                      n_thetas_z, z_chunk, w_charge, time_sigma)
 
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
             updates, opt_state = opt.update(grads, opt_state)
