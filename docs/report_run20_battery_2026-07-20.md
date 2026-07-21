@@ -29,3 +29,21 @@ identified vs conditioner d-dependence). Trained 43.5 min GPU, best val 10.68945
 - Intensity allocation check / more knots or width if ring rate stays high -> receipt 3.
 Artifacts: run20_splinemle/{ring_forward.png, moments.npz, ce_fivepoint*.npz,
 eridge_run20.npz, fano.npz, receipt scripts + logs}.
+
+## v1 verification (NB2 + phi(E), same day — full battery + paired Path C rerun)
+Trained: best val 10.30767 (-0.38 nats vs v0), n_eff 1.1108, disp [3.870, 0.0547].
+Path C rerun on IDENTICAL NPE draws (pairing exact), pre-registered predictions:
+- (a) along-ray tilt collapses: FALSIFIED (global ray z +58.5 -> +55.9, strata
+  unchanged). phi(E) is count-only; the ray tilt lives in the per-hit spatial
+  factors. The disagreement is geometric, not energy-brightness.
+- (b) E-tilt sign-flip collapses: CONFIRMED (v0 swung +8.5 -> -8.1 across E; v1
+  +0.1 -> -4.4; residual flat negative offset, global E z +2.4 -> -8.8).
+- (c) t-tilt persists (NPE-side): CONFIRMED (+23.6 -> +25.0, phi-invariant).
+Battery: Bartlett strata 1.99/3.16/4.04/4.58 -> 1.04/1.51/2.88/3.33 (halved, not
+closed); dispersion-gap hypothesis CONFIRMED — affine log r gives model Fano
+1.12->4.25 vs data 2.93->6.61, gap widens with E. eridge -0.161 (ties lam1, beats
+v0 -0.185, misses |<=0.1|). CE_excess ~= v0 (phi is count-only, as designed).
+Ring rate +22% (vs +25%): sensor-softmax spatial issue, count factor can't fix it.
+Levers left: steeper/nonlinear log r(E); per-hit conditioner capacity for the
+along-ray/ring-rate axis. Receipts: training_runs/run20_splinemle_v1/receipts/,
+training_runs/pathC_v1/.
