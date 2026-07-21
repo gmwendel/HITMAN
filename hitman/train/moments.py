@@ -18,6 +18,8 @@ Component convention: theta = (x, y, z, zen, az, t, E); r-suffix = projection of
 spatial block onto d_hat = (sin zen cos az, sin zen sin az, cos zen).
 """
 
+from typing import Callable, NamedTuple, Tuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -26,29 +28,66 @@ from hitman.spec import WC_HYP_SPEC
 
 # Parameter names/dimension come from the injected hypothesis spec (WC by default) rather
 # than a hardcoded 7 — swap ``WC_HYP_SPEC`` for another :class:`hitman.spec.HypSpec` to
-# retarget the identity vectors. The ray projection below (``direction``/``_ray_entries``)
-# is the WC (zen, az) instrument; a fully frame-agnostic projection is DESIGN proposal 4.
+# retarget the identity vectors.
 _NDIM = WC_HYP_SPEC.dim
 VECH_IDX = np.array([(i, j) for i in range(_NDIM) for j in range(i, _NDIM)])  # 28 pairs
 _P = list(WC_HYP_SPEC.names)
-LEAN_NAMES = (
-    ["g_" + n for n in _P]
-    + ["g_ray"]
-    + ["B_" + n + n for n in _P]
-    + ["B_tE", "B_rayray", "B_Eray", "B_tray"]
-)
-FULL_NAMES = (
-    LEAN_NAMES[:8]
-    + [f"B_{_P[i]}{_P[j]}" for i, j in VECH_IDX]
-    + ["B_rayray", "B_Eray", "B_tray"]
-)
-N_LEAN, N_FULL = len(LEAN_NAMES), len(FULL_NAMES)
 
 
 def direction(theta):
-    zen, az = theta[3], theta[4]
+    """Water-Cherenkov ray instrument: unit direction from (zen, az)."""
+    zen, az = theta[WC_HYP_SPEC.zenith], theta[WC_HYP_SPEC.azimuth]
     s = jnp.sin(zen)
     return jnp.stack([s * jnp.cos(az), s * jnp.sin(az), jnp.cos(zen)])
+
+
+class ProjectionInstrument(NamedTuple):
+    """An injectable projection instrument ``v(theta)`` for the moment/identity vectors.
+
+    ``project`` maps ``theta`` to a unit vector spanning the ``spatial`` parameter block; the
+    Bartlett rows are then projected onto it, and the two scalar ``partners`` are the
+    parameters whose cross-coupling to the projection is reported (WC: t and E). Injecting a
+    different instrument (e.g. a shower-axis direction with partners ``(dt, X_max)``) retargets
+    "project onto the ray" to "project onto any instrument" without touching the receipt
+    numerics of the default. ``partner_names`` label the receipt components.
+
+    DESIGN proposal 4. The WC default :data:`RAY_INSTRUMENT` reproduces the pre-refactor
+    ``lean_vector``/``full_vector`` bit-for-bit (locked by ``tests/test_moments_instrument.py``).
+    """
+
+    project: Callable
+    spatial: Tuple[int, ...] = (0, 1, 2)
+    partners: Tuple[int, int] = (5, 6)
+    partner_names: Tuple[str, str] = ("t", "E")
+
+
+# Water-Cherenkov default: the (zen, az) ray over the (x, y, z) spatial block, with the
+# t (5) and E (6) parameters as the reported cross-coupling partners.
+RAY_INSTRUMENT = ProjectionInstrument(
+    project=direction,
+    spatial=(0, 1, 2),
+    partners=(WC_HYP_SPEC.index("t"), WC_HYP_SPEC.index("E")),
+    partner_names=("t", "E"),
+)
+
+
+def moment_names(names=None, instrument: ProjectionInstrument = RAY_INSTRUMENT):
+    """(LEAN_NAMES, FULL_NAMES) for the given parameter names + projection instrument.
+
+    Order matches ``lean_vector``/``full_vector`` exactly (receipts and W share it)."""
+    names = _P if names is None else list(names)
+    p_lo, p_hi = instrument.partner_names
+    head = ["g_" + n for n in names] + ["g_ray"]
+    lean = (head + ["B_" + n + n for n in names]
+            + [f"B_{p_lo}{p_hi}", "B_rayray", f"B_{p_hi}ray", f"B_{p_lo}ray"])
+    idx = np.array([(i, j) for i in range(len(names)) for j in range(i, len(names))])
+    full = (head + [f"B_{names[i]}{names[j]}" for i, j in idx]
+            + ["B_rayray", f"B_{p_hi}ray", f"B_{p_lo}ray"])
+    return lean, full
+
+
+LEAN_NAMES, FULL_NAMES = moment_names(_P, RAY_INSTRUMENT)
+N_LEAN, N_FULL = len(LEAN_NAMES), len(FULL_NAMES)
 
 
 def grad_hess(loglik, theta, ev):
@@ -58,22 +97,30 @@ def grad_hess(loglik, theta, ev):
     return g, H
 
 
-def _ray_entries(B, d):
-    return jnp.stack([d @ B[:3, :3] @ d, B[6, :3] @ d, B[5, :3] @ d])
+def _ray_entries(B, d, instrument: ProjectionInstrument = RAY_INSTRUMENT):
+    sp = jnp.asarray(instrument.spatial)
+    p_lo, p_hi = instrument.partners
+    Bss = B[sp][:, sp]
+    return jnp.stack([d @ Bss @ d, B[p_hi][sp] @ d, B[p_lo][sp] @ d])
 
 
-def lean_vector(g, H, theta):
+def lean_vector(g, H, theta, instrument: ProjectionInstrument = RAY_INSTRUMENT):
     B = H + jnp.outer(g, g)
-    d = direction(theta)
+    d = instrument.project(theta)
+    sp = jnp.asarray(instrument.spatial)
+    p_lo, p_hi = instrument.partners
     return jnp.concatenate([
-        g, (g[:3] @ d)[None], jnp.diag(B), B[5, 6][None], _ray_entries(B, d)])
+        g, (g[sp] @ d)[None], jnp.diag(B), B[p_lo, p_hi][None],
+        _ray_entries(B, d, instrument)])
 
 
-def full_vector(g, H, theta):
+def full_vector(g, H, theta, instrument: ProjectionInstrument = RAY_INSTRUMENT):
     B = H + jnp.outer(g, g)
-    d = direction(theta)
+    d = instrument.project(theta)
+    sp = jnp.asarray(instrument.spatial)
     vech = B[VECH_IDX[:, 0], VECH_IDX[:, 1]]
-    return jnp.concatenate([g, (g[:3] @ d)[None], vech, _ray_entries(B, d)])
+    return jnp.concatenate([g, (g[sp] @ d)[None], vech,
+                            _ray_entries(B, d, instrument)])
 
 
 def shrunk_inverse(S, n, ridge_frac=0.05):
