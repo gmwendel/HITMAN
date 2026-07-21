@@ -6,7 +6,10 @@ Feature definitions and normalizations are kept bit-for-bit identical to 1.x
 
 import jax.numpy as jnp
 
-# Hypothesis vector layout (7,): x, y, z [mm], zenith, azimuth [rad], t [ns], E [MeV]
+# Hypothesis vector layout (7,): x, y, z [mm], zenith, azimuth [rad], t [ns], E [MeV].
+# This is the water-Cherenkov instantiation of the detector-agnostic
+# :class:`hitman.spec.HypSpec` (``hitman.spec.WC_HYP_SPEC``); the column order and names
+# here are the canonical WC layout and are locked to that spec by ``tests/test_spec.py``.
 X, Y, Z, ZENITH, AZIMUTH, TIME, ENERGY = range(7)
 
 POSITION_SCALE = 1000.0  # mm

@@ -145,8 +145,21 @@ def load_receipts(path: str) -> dict:
     return receipts
 
 
-def validate_schema(receipts: dict) -> None:
-    """Cheap structural validation — raises ``ValueError`` on a malformed document."""
+# Water-Cherenkov hypothesis dimension — the default when a document does not declare its
+# own. Detector-agnostic documents may set ``meta.hyp_dim`` (e.g. from a HypSpec) to their
+# own hypothesis length; the WC receipts keep the historical 7 with no change on their side.
+DEFAULT_HYP_DIM = 7
+
+
+def validate_schema(receipts: dict, hyp_dim: Optional[int] = None) -> None:
+    """Cheap structural validation — raises ``ValueError`` on a malformed document.
+
+    The expected ``truth`` length is, in order of precedence: the explicit ``hyp_dim``
+    argument, else ``receipts["meta"]["hyp_dim"]`` if present, else
+    :data:`DEFAULT_HYP_DIM` (7, water-Cherenkov). A detector with a different hypothesis
+    dimension records ``meta.hyp_dim`` (see :class:`hitman.spec.HypSpec`) and validates
+    with no other change.
+    """
     if receipts.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(
             f"schema_version {receipts.get('schema_version')!r} != {SCHEMA_VERSION!r}"
@@ -156,9 +169,12 @@ def validate_schema(receipts: dict) -> None:
             raise ValueError(f"missing top-level key {key!r}")
     if not isinstance(receipts["testpoints"], dict):
         raise ValueError("'testpoints' must be a mapping tag -> block")
+    if hyp_dim is None:
+        hyp_dim = receipts.get("meta", {}).get("hyp_dim", DEFAULT_HYP_DIM)
     for tag, block in receipts["testpoints"].items():
         for req in ("truth", "self_norm"):
             if req not in block:
                 raise ValueError(f"testpoint {tag!r} missing {req!r}")
-        if len(block["truth"]) != 7:
-            raise ValueError(f"testpoint {tag!r} truth must have 7 entries")
+        if len(block["truth"]) != hyp_dim:
+            raise ValueError(
+                f"testpoint {tag!r} truth must have {hyp_dim} entries")

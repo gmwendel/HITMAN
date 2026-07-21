@@ -22,8 +22,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-VECH_IDX = np.array([(i, j) for i in range(7) for j in range(i, 7)])  # 28 pairs
-_P = ["x", "y", "z", "zen", "az", "t", "E"]
+from hitman.spec import WC_HYP_SPEC
+
+# Parameter names/dimension come from the injected hypothesis spec (WC by default) rather
+# than a hardcoded 7 — swap ``WC_HYP_SPEC`` for another :class:`hitman.spec.HypSpec` to
+# retarget the identity vectors. The ray projection below (``direction``/``_ray_entries``)
+# is the WC (zen, az) instrument; a fully frame-agnostic projection is DESIGN proposal 4.
+_NDIM = WC_HYP_SPEC.dim
+VECH_IDX = np.array([(i, j) for i in range(_NDIM) for j in range(i, _NDIM)])  # 28 pairs
+_P = list(WC_HYP_SPEC.names)
 LEAN_NAMES = (
     ["g_" + n for n in _P]
     + ["g_ray"]

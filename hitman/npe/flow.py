@@ -321,6 +321,20 @@ class ConditionalFlow(eqx.Module):
                 hidden, cond_depth, period, key=keys[l]))
         self.layers = tuple(layers)
 
+    @classmethod
+    def from_spec(cls, spec, context_dim, *, key, **kwargs):
+        """Build a flow whose domain (dim, box, cos/circular dims, period) comes from a
+        :class:`hitman.spec.HypSpec`. The WC default is exactly
+        ``ConditionalFlow.from_spec(WC_HYP_SPEC, ...)``. Extra ``kwargs`` (``n_layers``,
+        ``n_bins``, ...) pass through unchanged; ``box``/``cos_dims``/``circular_dims``/
+        ``n_dim``/``period`` are taken from the spec and must not be overridden here."""
+        clash = {"n_dim", "box", "cos_dims", "circular_dims", "period"} & set(kwargs)
+        if clash:
+            raise TypeError(f"from_spec derives {sorted(clash)} from the spec; drop them")
+        return cls(context_dim, key=key, n_dim=spec.dim, box=spec.box,
+                   cos_dims=spec.cos_dims, circular_dims=spec.circular_dims,
+                   period=spec.period, **kwargs)
+
     # -- density / transforms ---------------------------------------------------
     def forward_to_base(self, theta, context):
         """theta -> (z in base space, log|det dz/dtheta|)."""
