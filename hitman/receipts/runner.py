@@ -2,11 +2,15 @@
 
     python -m hitman.receipts <model_dir> <testpoint.root>[:tag:x,y,z,zen,az,t,E] ...
 
-The heavy, model/JAX-facing loaders live here; the numerical receipt logic lives in the
-sibling modules (``reweight``, ``chi2``, ``forward``, ``score``, ``mle``) and is unit-
-tested with synthetic stand-ins. The seam is deliberate: :func:`compute_forward_block`
-takes precomputed log-weights and MC arrays, so the whole forward battery is exercised
-in tests with tiny random nets and no ROOT file.
+The detector-coupled I/O — WC model-class loading, the HitStore marginal pool, the ROOT MC
+loader — lives here; the reusable, ``(model, data)``-agnostic battery lives in
+:mod:`hitman.receipts.harness` (DESIGN proposal 3) and the numeric receipt logic in the
+sibling modules (``reweight``, ``chi2``, ``forward``, ``score``, ``mle``). ``run_model_dir``
+is the WC instantiation: it wires an :class:`~hitman.receipts.harness.NREReceiptModel` and
+the default ``z_rings`` strata through
+:func:`~hitman.receipts.harness.forward_block_from_model`. The generic seam
+(:func:`~hitman.receipts.harness.compute_forward_block`) is re-exported here so the
+historical ``from hitman.receipts.runner import compute_forward_block`` path is unchanged.
 """
 
 import json
@@ -17,9 +21,18 @@ from typing import Optional
 
 import numpy as np
 
-from hitman.receipts import forward as fwd
 from hitman.receipts import schema
-from hitman.receipts.reweight import self_normalized_weights
+# Detector-agnostic battery pieces live in harness; re-exported for backward compatibility.
+from hitman.receipts.harness import (  # noqa: F401
+    NREReceiptModel,
+    ReceiptModel,
+    chargenet_logit_grid,
+    compute_forward_block,
+    forward_block_from_model,
+    hit_logits,
+    percentile_strata,
+    z_rings,
+)
 
 TIME_SIGMA = 50.0  # +/-50 ns event-time augmentation the classifier was calibrated with
 
@@ -34,72 +47,6 @@ def git_sha(cwd: Optional[str] = None) -> str:
         ).decode().strip()
     except Exception:
         return "unknown"
-
-
-# ---- forward receipt core (numpy-only; the tested seam) ----------------------
-
-
-def z_rings(pmt_pos, n_rings: int):
-    """Assign each PMT to a z-ring with roughly equal geometry coverage."""
-    z = np.asarray(pmt_pos)[:, 2]
-    edges = np.unique(np.percentile(z, np.linspace(0, 100, n_rings + 1)))
-    n = len(edges) - 1
-    ring = np.clip(np.digitize(z, edges) - 1, 0, n - 1)
-    return ring, n
-
-
-def compute_forward_block(
-    logw,
-    pool_pmt,
-    pool_t,
-    pmt_pos,
-    mc_pmt,
-    mc_t,
-    mc_ntot,
-    n_mc_events: int,
-    chargenet_logit_c,
-    n_grid,
-    train_n_hist,
-    n_rings: int = 8,
-    time_bins=None,
-    ring_time_bins=None,
-):
-    """Assemble the serialized ``forward`` block + (self_norm, ess) from arrays.
-
-    Everything model-specific has already been reduced to ``logw`` (pool log-ratios)
-    and ``chargenet_logit_c`` (chargenet logits over ``n_grid``); this function is pure
-    numpy and is the unit-tested entry point.
-    """
-    pool = self_normalized_weights(logw)
-    pmt_pos = np.asarray(pmt_pos)
-    n_pmts = len(pmt_pos)
-
-    pmf, mean_ntot = fwd.implied_ntot_pmf(chargenet_logit_c, train_n_hist, n_grid)
-
-    per_pmt = fwd.per_pmt_charge_receipt(
-        pool, pool_pmt, n_pmts, mc_pmt, n_mc_events, mean_ntot
-    )
-    toa = fwd.toa_receipt(pool, pool_t, mc_t, bins=time_bins)
-    ntot = fwd.ntot_receipt(pmf, n_grid, train_n_hist, mc_ntot, n_mc_events)
-
-    ring, nr = z_rings(pmt_pos, n_rings)
-    mc_ring = ring[np.asarray(mc_pmt)]
-    pool_ring = ring[np.asarray(pool_pmt)]
-    if ring_time_bins is None:
-        ring_time_bins = np.linspace(
-            np.floor(np.min(mc_t)), np.percentile(mc_t, 99.5), 41
-        )
-    ring_time = fwd.per_ring_time_receipt(
-        pool, pool_t, pool_ring, mc_t, mc_ring, nr, ring_time_bins
-    )
-
-    forward_block = {
-        "per_pmt_charge": schema.chi2_block(per_pmt),
-        "toa": schema.chi2_block(toa),
-        "n_tot": schema.ntot_block(ntot),
-        "per_ring_time": schema.ring_time_block(ring_time),
-    }
-    return forward_block, pool.self_norm, pool.ess
 
 
 # ---- model / data loaders (JAX; used by the CLI) -----------------------------
@@ -145,36 +92,6 @@ def build_marginal_pool(store, n_pool: int, seed: int = 0):
     return pool_pmt, pool_t, np.asarray(store.pmt_pos)
 
 
-def hit_logits(hitnet, obs_style, pool_pmt, pool_t, pmt_pos, theta, chunk: int = 500_000):
-    """log r_hit over the pool at fixed theta (chunked; obs-style aware)."""
-    import jax
-    import jax.numpy as jnp
-
-    M = len(pool_pmt)
-    if obs_style == "id_t":
-        fn = jax.jit(jax.vmap(lambda i, t: hitnet((i, t), theta)))
-        return np.concatenate(
-            [
-                np.asarray(fn(jnp.asarray(pool_pmt[i : i + chunk]), jnp.asarray(pool_t[i : i + chunk])))
-                for i in range(0, M, chunk)
-            ]
-        )
-    obs = np.concatenate([pmt_pos[pool_pmt], pool_t[:, None]], axis=1).astype(np.float32)
-    fn = jax.jit(jax.vmap(lambda h: hitnet(h, theta)))
-    return np.concatenate(
-        [np.asarray(fn(jnp.asarray(obs[i : i + chunk]))) for i in range(0, M, chunk)]
-    )
-
-
-def chargenet_logit_grid(chargenet, n_grid, theta):
-    """log r_charge over an integer N grid at fixed theta (uses (N, N) as (q, nhit))."""
-    import jax
-    import jax.numpy as jnp
-
-    c_obs = jnp.asarray(np.stack([n_grid, n_grid], axis=1).astype(np.float32))
-    return np.asarray(jax.jit(jax.vmap(lambda c: chargenet(c, theta)))(c_obs))
-
-
 # ---- top-level orchestration -------------------------------------------------
 
 
@@ -200,6 +117,7 @@ def run_model_dir(
 
     store = HitStore(store_path)
     hitnet, chargenet, obs_style = load_models(model_dir, store)
+    model = NREReceiptModel(hitnet, chargenet, obs_style)
     pool_pmt, pool_t, pmt_pos = build_marginal_pool(store, n_pool, seed=seed)
 
     train_counts = np.asarray(store.charge[:, 1]).astype(int)
@@ -213,14 +131,12 @@ def run_model_dir(
         mc_ntot = np.asarray(mc.charge[:, 1])
         n_mc_events = mc.n_events
 
-        logw = hit_logits(hitnet, obs_style, pool_pmt, pool_t, pmt_pos, theta)
         n_grid = np.arange(0, int(mc_ntot.max() * 2 + 50))
         train_n_hist = np.bincount(train_counts, minlength=len(n_grid))[: len(n_grid)]
-        logit_c = chargenet_logit_grid(chargenet, n_grid, theta)
 
-        forward_block, self_norm, ess = compute_forward_block(
-            logw, pool_pmt, pool_t, pmt_pos, mc_pmt, mc_t, mc_ntot,
-            n_mc_events, logit_c, n_grid, train_n_hist,
+        forward_block, self_norm, ess = forward_block_from_model(
+            model, pool_pmt, pool_t, pmt_pos, mc_pmt, mc_t, mc_ntot,
+            n_mc_events, n_grid, train_n_hist, theta,
         )
         testpoint_blocks[tag] = schema.testpoint_receipt(
             truth=truth, self_norm=self_norm, ess=ess, forward=forward_block

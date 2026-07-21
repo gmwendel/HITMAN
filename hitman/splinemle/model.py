@@ -61,14 +61,33 @@ and the event is a marked Poisson process over sensors:
 Everything here is closed form and differentiable. If you ever find yourself adding a
 sampled or gridded normalizer, STOP -- that is the forbidden move this whole design exists
 to avoid.
+
+FACTORED CORE (DESIGN proposal 2). The closed-form pieces are no longer defined here: the
+log-spline time factor lives in :mod:`hitman.density.logspline` and the NB2/Poisson count +
+monotone yield head in :mod:`hitman.density.count`, behind the
+:class:`hitman.density.factors.DensityFactor` protocol. This ``SplineMLE`` keeps its own
+trainable leaves and calls those SAME pure functions, so it is exactly reconstructible from
+the extracted factors (:class:`~hitman.density.factors.SoftmaxMarkFactor` x
+:class:`~hitman.density.logspline.LogSplineFactor` x
+:class:`~hitman.density.count.CountFactor`); the historical import paths through this module
+are preserved by re-export. A downstream detector composes its own likelihood from the same
+factors with no new normalization code.
 """
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
-from jax.scipy.special import gammaln, logsumexp
+from jax.scipy.special import logsumexp
 
+from hitman.density.count import (DEFAULT_PHI_KNOTS, E_REF_DISP, affine_log_dispersion,
+                                  init_phi_params, monotone_phi_values, nb2_log_count,
+                                  phi_at, poisson_log_count)
+# Closed-form log-spline pieces now live in hitman.density.logspline; imported here and
+# re-exported so the historical ``from hitman.splinemle.model import ...`` paths (loss.py,
+# tests) keep working unchanged.
+from hitman.density.logspline import (  # noqa: F401  (re-exported for backward compat)
+    SUPPORT_FLOOR, density_u, ell_at, interval_log_integrals, log_expm1_over_x, log_prob_u,
+    logZ_time)
 from hitman.nn import features as ft
 from hitman.nn.mlp import get_activation
 
@@ -97,117 +116,10 @@ COND_SQUASH_SCALE = 8.0
 
 _N_COND_FEATURES = {"v1": N_COND_FEATURES, "v2": N_COND_FEATURES_V2}
 
-# phi(E) yield-head knots on [0, 10] MeV (8 knots) and the dispersion linearization anchor.
-DEFAULT_PHI_KNOTS = (0.0, 0.75, 1.5, 2.5, 3.5, 5.0, 7.0, 10.0)
-E_REF_DISP = 5.0
-
-# Loss-side finite floor for the log time-density at out-of-support u. The TRUE model has
-# zero density there (log = -inf); on finite data we replace -inf by this finite value so a
-# stray hit (or a masked pad slot) contributes a large-but-finite penalty and gradients stay
-# clean. The receipt tests use floor=-inf to check the exact hard-support model.
-SUPPORT_FLOOR = -40.0
-
-
-# ---------------------------------------------------------------------------
-# Closed-form pieces (pure functions, all differentiable)
-# ---------------------------------------------------------------------------
-
-def log_expm1_over_x(z):
-    """log(expm1(z) / z): C-infinity, -> 0 as z -> 0, overflow-safe for large |z|.
-
-    expm1(z)/z > 0 for all real z, so its log is everywhere defined. Near 0 we use the
-    Taylor series log((e^z-1)/z) = z/2 + z^2/24 - z^4/2880 + O(z^6). Away from 0 we use the
-    overflow-safe identity |e^z - 1| = e^{max(z,0)} * (-expm1(-|z|)), i.e.
-    log(expm1(z)/z) = max(z,0) + log(-expm1(-|z|)) - log|z|. The double-``where`` keeps the
-    unused branch NaN-free so reverse-mode gradients are finite at every z (incl. exactly 0).
-    """
-    small = jnp.abs(z) < 1e-2
-    z_big = jnp.where(small, 1.0, z)  # dummy in the small region; result discarded there
-    az = jnp.abs(z_big)
-    log_abs_expm1 = jnp.maximum(z_big, 0.0) + jnp.log(-jnp.expm1(-az))
-    big = log_abs_expm1 - jnp.log(az)
-    series = z * (0.5 + z * (1.0 / 24.0 - z * z / 2880.0))
-    return jnp.where(small, series, big)
-
-
-def interval_log_integrals(node_vals, knots):
-    """Per-interval log integral of e^{ell} where ell is piecewise-linear.
-
-    On [u_j, u_{j+1}]: ell(u) = a_j + b_j (u - u_j) with a_j = node_vals[j],
-    b_j = (node_vals[j+1]-node_vals[j])/dk_j. The integral is
-    e^{a_j} dk_j * expm1(b_j dk_j)/(b_j dk_j); note b_j dk_j = node_vals[j+1]-node_vals[j].
-    Returns (J,) log integrals. Exact at b_j = 0 (uniform interval) via the series switch.
-    """
-    dk = knots[1:] - knots[:-1]
-    a = node_vals[:-1]
-    z = node_vals[1:] - node_vals[:-1]  # == b_j * dk_j
-    return a + jnp.log(dk) + log_expm1_over_x(z)
-
-
-def logZ_time(node_vals, knots):
-    """Exact log partition of the log-spline time density: logsumexp of interval integrals."""
-    return logsumexp(interval_log_integrals(node_vals, knots))
-
-
-def ell_at(u, node_vals, knots):
-    """Piecewise-linear ell(u). ``jnp.interp`` clamps to the edge values outside the knot
-    span; callers mask the out-of-support region explicitly, so the clamp is never used."""
-    return jnp.interp(u, knots, node_vals)
-
-
-def log_prob_u(u, node_vals, knots, floor=-jnp.inf):
-    """log p_hat(u) = ell(u) - log Z_t inside [u_0, u_J], else ``floor`` (-inf = true model).
-    Because u = t - t_geo is an affine reparametrization of t with unit Jacobian, this is
-    also log p_hat(t | s, theta)."""
-    inside = (u >= knots[0]) & (u <= knots[-1])
-    lp = ell_at(u, node_vals, knots) - logZ_time(node_vals, knots)
-    return jnp.where(inside, lp, floor)
-
-
-def density_u(u, node_vals, knots):
-    """p_hat(u) = exp(log_prob_u); zero outside support. Vectorizes over ``u`` arrays."""
-    lp = jax.vmap(lambda uu: log_prob_u(uu, node_vals, knots))(jnp.atleast_1d(u))
-    return jnp.exp(lp)
-
 
 # ---------------------------------------------------------------------------
 # The model
 # ---------------------------------------------------------------------------
-
-def _softplus_inverse(y):
-    """Inverse of softplus for y > 0: log(expm1(y)). Used to seed monotone increments."""
-    return jnp.log(jnp.expm1(jnp.asarray(y, jnp.float32)))
-
-
-def _init_phi_params(phi_knots, phi_init_values, phi_offset, phi_anchor):
-    """Seed (phi_e0, phi_raw) for the monotone phi(E) spline.
-
-    ``phi_init_values`` (K,) are target log-yield log Ybar(E) at ``phi_knots`` (from the
-    harvested curve); if None, phi initializes near-flat (phi == 0). The pre-softplus
-    increments encode the SHAPE/concavity; the absolute level (phi_e0) is degenerate with
-    the eta level and is only a starting point:
-      * ``phi_anchor=(E_a, log_meanN_a)`` centers init logLambda(E_a) ~ log_meanN_a assuming
-        logsumexp(eta_init) ~ log(phi_offset) (the ~241-sensor scale). Preferred.
-      * else phi_e0 = logY(knot0) - log(phi_offset).
-    """
-    K = len(phi_knots)
-    if phi_init_values is None:
-        inc = np.full(K - 1, 1e-4, np.float32)          # near-flat
-        v0 = 0.0
-    else:
-        v = np.asarray(phi_init_values, np.float64)
-        inc = np.maximum(np.diff(v), 1e-3).astype(np.float32)  # positive => monotone init
-        v0 = float(v[0])
-    phi_raw = _softplus_inverse(jnp.asarray(inc, jnp.float32))
-    if phi_anchor is not None:
-        e_a, log_meanN_a = float(phi_anchor[0]), float(phi_anchor[1])
-        cum = np.concatenate([[0.0], np.cumsum(inc)])   # phi shape relative to phi_e0
-        cum_at_a = float(np.interp(e_a, np.asarray(phi_knots, float), cum))
-        phi_e0 = log_meanN_a - np.log(phi_offset) - cum_at_a
-    else:
-        phi_e0 = v0 - np.log(phi_offset)
-    return jnp.asarray(phi_e0, jnp.float32), phi_raw
-
 
 class _CondMLP(eqx.Module):
     """Plain MLP with a linear VECTOR head and a STATIC activation name.
@@ -331,8 +243,8 @@ class SplineMLE(eqx.Module):
         if count_model not in ("poisson", "nbinom"):
             raise ValueError(f"unsupported count_model {count_model!r}")
         self.count_model = count_model
-        phi_e0, phi_raw = _init_phi_params(self.phi_knots, phi_init_values, phi_offset,
-                                           phi_anchor)
+        phi_e0, phi_raw = init_phi_params(self.phi_knots, phi_init_values, phi_offset,
+                                          phi_anchor)
         self.phi_e0 = phi_e0
         self.phi_raw = phi_raw
         self.disp = jnp.asarray(disp_init, jnp.float32)
@@ -352,16 +264,15 @@ class SplineMLE(eqx.Module):
     @property
     def phi_values(self) -> jnp.ndarray:
         """Monotone (non-decreasing) knot values: phi_e0 + cumulative softplus increments."""
-        inc = jax.nn.softplus(self.phi_raw)
-        return self.phi_e0 + jnp.concatenate([jnp.zeros(1, inc.dtype), jnp.cumsum(inc)])
+        return monotone_phi_values(self.phi_e0, self.phi_raw)
 
     def phi(self, E):
         """Monotone piecewise-linear log-yield scale phi(E). Lives ONLY in the count mean."""
-        return jnp.interp(E, self.phi_knots_arr, self.phi_values)
+        return phi_at(E, self.phi_knots_arr, self.phi_values)
 
     def log_dispersion(self, E):
         """Affine log-dispersion log r(E) = disp0 + disp1 (E - E_REF); r -> inf is Poisson."""
-        return self.disp[0] + self.disp[1] * (E - E_REF_DISP)
+        return affine_log_dispersion(E, self.disp, E_REF_DISP)
 
     # -- geometry / conditioner ------------------------------------------------
     def _sensor_features(self, pos, nrm, theta):
@@ -513,9 +424,5 @@ class SplineMLE(eqx.Module):
         Poisson (``count_model='poisson'``): the v0 marked-Poisson tie.
         """
         if self.count_model == "poisson":
-            return N * log_Lambda - jnp.exp(log_Lambda) - gammaln(N + 1.0)
-        log_r = self.log_dispersion(E)
-        r = jnp.exp(log_r)
-        log_r_plus_mu = jnp.logaddexp(log_r, log_Lambda)  # log(r + Lambda), stable
-        return (gammaln(N + r) - gammaln(r) - gammaln(N + 1.0)
-                + r * (log_r - log_r_plus_mu) + N * (log_Lambda - log_r_plus_mu))
+            return poisson_log_count(N, log_Lambda)
+        return nb2_log_count(N, log_Lambda, self.log_dispersion(E))
