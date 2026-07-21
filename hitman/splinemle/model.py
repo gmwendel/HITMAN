@@ -251,22 +251,46 @@ class SplineMLE(eqx.Module):
     phi_knots: tuple = eqx.field(static=True)
     count_model: str = eqx.field(static=True)
     feature_set: str = eqx.field(static=True)
+    head_mode: str = eqx.field(static=True, default="joint")
+    # SPLIT-HEAD (run22): optional SECOND trunk that emits ONLY eta_s, decoupling the sensor
+    # allocation from the 23 time-spline node outputs. In "joint" mode this is None and
+    # contributes NO array leaves, so joint (v1/v2) checkpoints round-trip BIT-IDENTICALLY
+    # through a default template -- verified. In "split" mode ``mlp`` emits n_nodes time
+    # nodes and ``mlp_eta`` emits the single eta.
+    mlp_eta: object = None
 
     def __init__(self, pmt_pos, pmt_normal, *, key, knots=DEFAULT_KNOTS, width: int = 192,
                  depth: int = 3, n_eff_init: float = 1.40, activation: str = "mish",
                  count_model: str = "nbinom", phi_knots=DEFAULT_PHI_KNOTS,
                  phi_init_values=None, phi_offset: float = 241.0, phi_anchor=None,
-                 disp_init=(3.5, 0.15), feature_set: str = "v1"):
+                 disp_init=(3.5, 0.15), feature_set: str = "v1", head_mode: str = "joint",
+                 eta_width: int = 128, eta_depth: int = 3):
         self.knots = tuple(float(k) for k in knots)
         self.phi_knots = tuple(float(k) for k in phi_knots)
         if feature_set not in _N_COND_FEATURES:
             raise ValueError(f"unsupported feature_set {feature_set!r} "
                              f"(expected one of {sorted(_N_COND_FEATURES)})")
+        if head_mode not in ("joint", "split"):
+            raise ValueError(f"unsupported head_mode {head_mode!r} (expected joint|split)")
         self.feature_set = feature_set
+        self.head_mode = head_mode
         self.log_n_eff = jnp.log(jnp.asarray(n_eff_init, jnp.float32))
         n_nodes = len(self.knots)
-        self.mlp = _CondMLP(_N_COND_FEATURES[feature_set], n_nodes + 1, width, depth,
-                            activation=activation, key=key)
+        n_feat = _N_COND_FEATURES[feature_set]
+        if head_mode == "joint":
+            # UNCHANGED from v1/v2: one trunk emits [eta, node_0..node_{J}] (n_nodes+1).
+            self.mlp = _CondMLP(n_feat, n_nodes + 1, width, depth,
+                                activation=activation, key=key)
+            self.mlp_eta = None
+        else:
+            # SPLIT: ``mlp`` emits ONLY the n_nodes time nodes; ``mlp_eta`` (its own trunk,
+            # eta_width/eta_depth) emits the single eta scalar. Keys split deterministically
+            # so a given (key, head_mode) is reproducible.
+            k_time, k_eta = jax.random.split(key)
+            self.mlp = _CondMLP(n_feat, n_nodes, width, depth,
+                                activation=activation, key=k_time)
+            self.mlp_eta = _CondMLP(n_feat, 1, eta_width, eta_depth,
+                                    activation=activation, key=k_eta)
         self.pmt_pos = jnp.asarray(pmt_pos, jnp.float32)
         self.pmt_normal = jnp.asarray(pmt_normal, jnp.float32)
         if count_model not in ("poisson", "nbinom"):
@@ -341,6 +365,19 @@ class SplineMLE(eqx.Module):
         ]
         return jnp.stack(base), d
 
+    def _eta_nodes(self, feats):
+        """(eta scalar, nodes (J+1,)) for one sensor's feature vector.
+
+        joint: a single trunk emits [eta, node_0..node_J]; row 0 IS eta, rows 1: are nodes.
+        split: ``mlp`` emits the nodes, ``mlp_eta`` emits eta on its own trunk. The branch is
+        on ``self.mlp_eta is None`` -- a STATIC structural property, so it resolves at trace
+        time under jit/vmap.
+        """
+        if self.mlp_eta is None:
+            out = self.mlp(feats)
+            return out[0], out[1:]
+        return self.mlp_eta(feats)[0], self.mlp(feats)
+
     def event_tables(self, theta):
         """All-sensor conditioner for one theta: (eta (241,), nodes (241, J+1),
         t_geo (241,), logZt (241,)). Evaluated for every sensor (the softmax needs them)."""
@@ -352,9 +389,7 @@ class SplineMLE(eqx.Module):
 
         def one(p, n):
             feats, d = self._sensor_features(p, n, theta)
-            out = self.mlp(feats)
-            eta = out[0]
-            nodes = out[1:]
+            eta, nodes = self._eta_nodes(feats)
             t_geo = t0 + n_eff * d / C_MM_PER_NS
             return eta, nodes, t_geo, logZ_time(nodes, knots)
 
@@ -366,7 +401,7 @@ class SplineMLE(eqx.Module):
         pos = self.pmt_pos[pmt_id]
         nrm = self.pmt_normal[pmt_id]
         feats, d = self._sensor_features(pos, nrm, theta)
-        nodes = self.mlp(feats)[1:]
+        _, nodes = self._eta_nodes(feats)
         u = t - (theta[ft.TIME] + self.n_eff * d / C_MM_PER_NS)
         return log_prob_u(u, nodes, self.knots_arr, floor)
 

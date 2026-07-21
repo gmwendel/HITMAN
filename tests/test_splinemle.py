@@ -367,3 +367,110 @@ def test_batch_and_preflight():
     m = _toy_model(width=32)
     gib = step_max_intermediate_gib(m, data, spec, n_events=8, n_pad=32)
     assert np.isfinite(gib) and gib < 4.0
+
+
+# ---------------------------------------------------------------------------
+# run22: split eta/time conditioner heads (dedicated eta trunk)
+# ---------------------------------------------------------------------------
+def test_split_head_shapes_and_trunks():
+    # split: ``mlp`` emits n_nodes time nodes (NOT n_nodes+1), ``mlp_eta`` emits 1 eta, with
+    # its own width/depth. joint keeps the fused (n_nodes+1) trunk and mlp_eta is None.
+    pmt_pos, pmt_normal = _toy_geometry()
+    n_nodes = len(DEFAULT_KNOTS)
+    mj = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3)
+    assert mj.head_mode == "joint" and mj.mlp_eta is None
+    assert mj.mlp.layers[-1].weight.shape[0] == n_nodes + 1     # fused: eta + nodes
+    ms = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3,
+                   head_mode="split", eta_width=24, eta_depth=2)
+    assert ms.head_mode == "split" and ms.mlp_eta is not None
+    assert ms.mlp.layers[-1].weight.shape[0] == n_nodes         # time trunk: nodes only
+    assert ms.mlp_eta.layers[-1].weight.shape[0] == 1           # eta trunk: single scalar
+    assert len(ms.mlp_eta.layers) == 2 + 1                      # eta_depth=2 -> 3 Linear
+    assert ms.mlp_eta.layers[0].weight.shape == (24, 5)         # eta_width=24, v1 features
+    # event_tables shapes hold in split mode: eta (241,), nodes (241, n_nodes)
+    theta = jnp.asarray([10.0, 20.0, -30.0, 0.8, 1.0, 5.0, 4.0], jnp.float32)
+    eta, nodes, t_geo, logZt = ms.event_tables(theta)
+    assert eta.shape == (241,) and nodes.shape == (241, n_nodes)
+    assert t_geo.shape == (241,) and logZt.shape == (241,)
+
+
+def test_split_head_normalizes():
+    # a split model must still normalize exactly: softmax sensor factor sums to 1 and the
+    # time density integrates to 1 (closed-form partition unaffected by the head split).
+    jax.config.update("jax_enable_x64", True)
+    try:
+        pmt_pos, pmt_normal = _toy_geometry()
+        m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(1), width=32, depth=3,
+                      head_mode="split", eta_width=24, eta_depth=2, feature_set="v2")
+        theta = jnp.asarray([50.0, -80.0, 120.0, 1.1, 2.0, 0.0, 3.0], jnp.float64)
+        ls = jax.vmap(lambda s: m.log_prob_sensor(s, theta))(jnp.arange(241))
+        assert abs(float(jnp.sum(jnp.exp(ls))) - 1.0) < 1e-5
+        s = 73
+        d = float(jnp.linalg.norm(m.pmt_pos[s].astype(jnp.float64) - theta[:3]))
+        tg = float(theta[5]) + float(m.n_eff) * d / 299.792458
+        tt = np.linspace(tg + DEFAULT_KNOTS[0] + 1e-4, tg + DEFAULT_KNOTS[-1] - 1e-4, 2_000_001)
+        dens = np.asarray(m.density_time(jnp.asarray(tt), s, theta))
+        assert abs(float(np.trapezoid(dens, tt)) - 1.0) < 1e-4
+    finally:
+        jax.config.update("jax_enable_x64", False)
+
+
+def test_joint_roundtrip_bit_identical_with_split_field_present(tmp_path):
+    # The split-head field must NOT perturb joint-mode serialization: a joint model's array
+    # leaves and their BYTES must round-trip through a fresh joint template unchanged (so the
+    # real v1/v2 checkpoints still deserialize). mlp_eta=None contributes no leaves.
+    pmt_pos, pmt_normal = _toy_geometry()
+    m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(3), width=64, depth=3,
+                  feature_set="v2")
+    assert m.head_mode == "joint" and m.mlp_eta is None
+    leaves = jax.tree_util.tree_leaves(eqx.filter(m, eqx.is_array))
+    path = str(tmp_path / "joint.eqx")
+    eqx.tree_serialise_leaves(path, m)
+    tmpl = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(999), width=64, depth=3,
+                     feature_set="v2")
+    m_back = eqx.tree_deserialise_leaves(path, tmpl)
+    leaves_back = jax.tree_util.tree_leaves(eqx.filter(m_back, eqx.is_array))
+    assert len(leaves) == len(leaves_back)
+    for a, b in zip(leaves, leaves_back):
+        assert np.array_equal(np.asarray(a), np.asarray(b))      # bit-identical
+
+
+def test_split_head_serialise_roundtrip(tmp_path):
+    # a split model round-trips through a split template (both trunks recovered exactly).
+    pmt_pos, pmt_normal = _toy_geometry()
+    m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(5), width=48, depth=4,
+                  head_mode="split", eta_width=32, eta_depth=3, feature_set="v2")
+    path = str(tmp_path / "split.eqx")
+    eqx.tree_serialise_leaves(path, m)
+    tmpl = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(111), width=48, depth=4,
+                     head_mode="split", eta_width=32, eta_depth=3, feature_set="v2")
+    m_back = eqx.tree_deserialise_leaves(path, tmpl)
+    assert m_back.mlp_eta is not None
+    theta = jnp.asarray([10.0, 20.0, -30.0, 0.8, 1.0, 5.0, 4.0], jnp.float32)
+    eta0, nodes0, _, _ = m.event_tables(theta)
+    eta1, nodes1, _, _ = m_back.event_tables(theta)
+    assert float(jnp.max(jnp.abs(eta0 - eta1))) == 0.0
+    assert float(jnp.max(jnp.abs(nodes0 - nodes1))) == 0.0
+
+
+def test_split_head_gradient_flows_to_both_trunks():
+    # both trunks receive gradient under the event loss (eta head is no longer starved by the
+    # time nodes -- it has its own parameters).
+    pmt_pos, pmt_normal = _toy_geometry()
+    m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(2), width=32, depth=3,
+                  head_mode="split", eta_width=24, eta_depth=2)
+    rng = np.random.default_rng(9)
+    B, P = 6, 20
+    pmt_ids = jnp.asarray(rng.integers(0, 241, size=(B, P)), jnp.int32)
+    theta = jnp.asarray(rng.uniform(0.5, 9.5, size=(B, 7)).astype(np.float32))
+    tg = jax.vmap(lambda ss, th: jax.vmap(
+        lambda s: th[5] + m.n_eff * jnp.linalg.norm(m.pmt_pos[s] - th[:3]) / 299.792458
+    )(ss))(pmt_ids, theta)
+    t = tg + jnp.asarray(rng.uniform(0, 2, size=(B, P)), jnp.float32)
+    mask = jnp.ones((B, P), jnp.float32)
+    (loss, _), g = eqx.filter_value_and_grad(
+        lambda mm: splinemle_loss(mm, (pmt_ids, t, mask, theta)), has_aux=True)(m)
+    g_eta = sum(float(jnp.sum(jnp.abs(l.weight))) for l in g.mlp_eta.layers)
+    g_time = sum(float(jnp.sum(jnp.abs(l.weight))) for l in g.mlp.layers)
+    assert np.isfinite(g_eta) and g_eta > 0.0
+    assert np.isfinite(g_time) and g_time > 0.0
