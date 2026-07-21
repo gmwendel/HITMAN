@@ -252,19 +252,29 @@ class SplineMLE(eqx.Module):
     count_model: str = eqx.field(static=True)
     feature_set: str = eqx.field(static=True)
     head_mode: str = eqx.field(static=True, default="joint")
+    # DECOUPLED-INTENSITY (run23): "lse" reproduces v1/v2/r22 exactly (Lambda carries the
+    # softmax mass logsumexp(eta)); "head" gives the count mean its OWN geometry head psi so
+    # logLambda = phi(E) + psi(rho_vtx, z_vtx) and eta becomes a PURE (gauge-centered) shape.
+    # See ``log_intensity`` / ``event_tables``. In "lse" mode ``psi`` is None and contributes
+    # NO array leaves, so lse checkpoints (joint v1/v2, split r22) round-trip BIT-IDENTICALLY.
+    intensity_mode: str = eqx.field(static=True, default="lse")
     # SPLIT-HEAD (run22): optional SECOND trunk that emits ONLY eta_s, decoupling the sensor
     # allocation from the 23 time-spline node outputs. In "joint" mode this is None and
     # contributes NO array leaves, so joint (v1/v2) checkpoints round-trip BIT-IDENTICALLY
     # through a default template -- verified. In "split" mode ``mlp`` emits n_nodes time
     # nodes and ``mlp_eta`` emits the single eta.
     mlp_eta: object = None
+    # DECOUPLED-INTENSITY head (run23): small MLP (rho_vtx, z_vtx) -> scalar, present ONLY in
+    # ``intensity_mode="head"`` (requires ``head_mode="split"``). None -> no array leaves.
+    psi: object = None
 
     def __init__(self, pmt_pos, pmt_normal, *, key, knots=DEFAULT_KNOTS, width: int = 192,
                  depth: int = 3, n_eff_init: float = 1.40, activation: str = "mish",
                  count_model: str = "nbinom", phi_knots=DEFAULT_PHI_KNOTS,
                  phi_init_values=None, phi_offset: float = 241.0, phi_anchor=None,
                  disp_init=(3.5, 0.15), feature_set: str = "v1", head_mode: str = "joint",
-                 eta_width: int = 128, eta_depth: int = 3):
+                 eta_width: int = 128, eta_depth: int = 3, intensity_mode: str = "lse",
+                 psi_width: int = 32, psi_depth: int = 2):
         self.knots = tuple(float(k) for k in knots)
         self.phi_knots = tuple(float(k) for k in phi_knots)
         if feature_set not in _N_COND_FEATURES:
@@ -272,8 +282,14 @@ class SplineMLE(eqx.Module):
                              f"(expected one of {sorted(_N_COND_FEATURES)})")
         if head_mode not in ("joint", "split"):
             raise ValueError(f"unsupported head_mode {head_mode!r} (expected joint|split)")
+        if intensity_mode not in ("lse", "head"):
+            raise ValueError(f"unsupported intensity_mode {intensity_mode!r} (expected lse|head)")
+        if intensity_mode == "head" and head_mode != "split":
+            raise ValueError("intensity_mode='head' requires head_mode='split' (the count mean "
+                             "gets its own geometry head; eta becomes pure gauge-centered shape)")
         self.feature_set = feature_set
         self.head_mode = head_mode
+        self.intensity_mode = intensity_mode
         self.log_n_eff = jnp.log(jnp.asarray(n_eff_init, jnp.float32))
         n_nodes = len(self.knots)
         n_feat = _N_COND_FEATURES[feature_set]
@@ -285,12 +301,21 @@ class SplineMLE(eqx.Module):
         else:
             # SPLIT: ``mlp`` emits ONLY the n_nodes time nodes; ``mlp_eta`` (its own trunk,
             # eta_width/eta_depth) emits the single eta scalar. Keys split deterministically
-            # so a given (key, head_mode) is reproducible.
-            k_time, k_eta = jax.random.split(key)
+            # so a given (key, head_mode) is reproducible. head-intensity mode consumes a THIRD
+            # key for ``psi``; lse split keeps the original 2-way split (r22 reproducibility).
+            if intensity_mode == "head":
+                k_time, k_eta, k_psi = jax.random.split(key, 3)
+            else:
+                k_time, k_eta = jax.random.split(key)
             self.mlp = _CondMLP(n_feat, n_nodes, width, depth,
                                 activation=activation, key=k_time)
             self.mlp_eta = _CondMLP(n_feat, 1, eta_width, eta_depth,
                                     activation=activation, key=k_eta)
+        # psi: the run23 decoupled-intensity head. 2 event-level features -> scalar.
+        if intensity_mode == "head":
+            self.psi = _CondMLP(2, 1, psi_width, psi_depth, activation=activation, key=k_psi)
+        else:
+            self.psi = None
         self.pmt_pos = jnp.asarray(pmt_pos, jnp.float32)
         self.pmt_normal = jnp.asarray(pmt_normal, jnp.float32)
         if count_model not in ("poisson", "nbinom"):
@@ -393,7 +418,15 @@ class SplineMLE(eqx.Module):
             t_geo = t0 + n_eff * d / C_MM_PER_NS
             return eta, nodes, t_geo, logZ_time(nodes, knots)
 
-        return jax.vmap(one)(pos, nrm)
+        eta, nodes, t_geo, logZt = jax.vmap(one)(pos, nrm)
+        if self.intensity_mode == "head":
+            # Gauge-fix eta: subtract its per-theta mean over sensors. The sensor softmax is
+            # invariant to a constant shift (eta_s - mean and log_eta_Z shift together), so the
+            # sensor/time factors are UNCHANGED; centering only removes eta's now-unconstrained
+            # overall level (logLambda no longer reads logsumexp(eta) in head mode -> psi does),
+            # identifying eta as a pure shape.
+            eta = eta - jnp.mean(eta)
+        return eta, nodes, t_geo, logZt
 
     # -- per-hit / per-event log-densities (convenience; used by tests/receipts) --
     def log_prob_time(self, t, pmt_id, theta, floor=-jnp.inf):
@@ -421,6 +454,23 @@ class SplineMLE(eqx.Module):
         ls = eta[pmt_id] - logsumexp(eta)
         lt = log_prob_u(t - t_geo[pmt_id], nodes[pmt_id], self.knots_arr, floor)
         return ls + lt
+
+    def log_intensity(self, theta, log_eta_Z):
+        """log Lambda(theta), the log NB2/Poisson mean count.
+
+        * ``intensity_mode="lse"`` (v1/v2/r22): Lambda = exp(phi(E) + logsumexp(eta)); the
+          softmax mass carries the total yield, so this reads the caller's ``log_eta_Z``.
+        * ``intensity_mode="head"`` (run23): the count mean gets its OWN geometry head --
+          logLambda = phi(E) + psi(rho_vtx, z_vtx), rho_vtx = hypot(x, y). eta no longer feeds
+          Lambda (it is gauge-centered pure shape), so ``log_eta_Z`` is IGNORED here. This
+          decouples the sensor allocation from the count factor (run23-prep: the coupling
+          priced the sensor-optimal allocation out of the loss)."""
+        E = theta[ft.ENERGY]
+        if self.intensity_mode == "head":
+            rho = jnp.hypot(theta[ft.X], theta[ft.Y])
+            feats = jnp.stack([rho / ft.POSITION_SCALE, theta[ft.Z] / ft.POSITION_SCALE])
+            return self.phi(E) + self.psi(feats)[0]
+        return self.phi(E) + log_eta_Z
 
     def log_count(self, N, log_Lambda, E):
         """log p(N | theta). ``log_Lambda`` = phi(E) + logsumexp(eta) is the log mean count.

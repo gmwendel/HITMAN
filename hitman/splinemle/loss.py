@@ -22,13 +22,15 @@ def event_terms(model, pmt_ids, t, mask, theta, floor=SUPPORT_FLOOR):
     contribute 0 to the hit sum (the finite ``floor`` keeps their -inf-density gradients
     clean before the mask multiply). N = sum(mask). The SENSOR factor is softmax(eta) --
     the yield head phi(E) cancels here (an E-only additive scale is invariant under
-    softmax), so log_eta_Z below uses eta alone. The COUNT factor carries phi(E): the mean
-    is Lambda = exp(phi(E) + logsumexp eta) and N ~ NB2(Lambda, r(E)) (or Poisson).
+    softmax), so log_eta_Z below uses eta alone. The COUNT factor carries phi(E) via
+    ``model.log_intensity``: mean Lambda = exp(phi(E) + logsumexp eta) in "lse" mode, or
+    exp(phi(E) + psi(rho,z)) in "head" mode (run23); N ~ NB2(Lambda, r(E)) (or Poisson).
     """
     E = theta[ft.ENERGY]
     eta, nodes, t_geo, logZt = model.event_tables(theta)
     log_eta_Z = logsumexp(eta)                 # sensor-softmax normalizer (phi-free)
-    log_Lambda = model.phi(E) + log_eta_Z      # count mean carries the yield head
+    # count mean: lse -> phi(E) + log_eta_Z (unchanged); head -> phi(E) + psi(rho,z) head.
+    log_Lambda = model.log_intensity(theta, log_eta_Z)
     knots = model.knots_arr
 
     def per_hit(s, tt):

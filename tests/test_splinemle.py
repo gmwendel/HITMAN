@@ -453,6 +453,154 @@ def test_split_head_serialise_roundtrip(tmp_path):
     assert float(jnp.max(jnp.abs(nodes0 - nodes1))) == 0.0
 
 
+# ---------------------------------------------------------------------------
+# run23: decoupled intensity head (intensity_mode="head")
+# ---------------------------------------------------------------------------
+def test_intensity_head_requires_split_and_shapes():
+    # head requires head_mode="split"; psi is a 2 -> 1 MLP with its own width/depth; lse split
+    # / joint models carry NO psi (None).
+    pmt_pos, pmt_normal = _toy_geometry()
+    with pytest.raises(ValueError):
+        SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3,
+                  intensity_mode="head")  # joint head_mode -> reject
+    n_nodes = len(DEFAULT_KNOTS)
+    mh = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3,
+                   head_mode="split", eta_width=24, eta_depth=2, feature_set="v2",
+                   intensity_mode="head", psi_width=16, psi_depth=2)
+    assert mh.intensity_mode == "head" and mh.psi is not None and mh.mlp_eta is not None
+    assert mh.psi.layers[0].weight.shape == (16, 2)      # psi_width=16, 2 event features
+    assert mh.psi.layers[-1].weight.shape[0] == 1        # scalar out
+    assert len(mh.psi.layers) == 2 + 1                   # psi_depth=2 -> 3 Linear
+    # lse (default) split + joint carry no psi.
+    ms = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3,
+                   head_mode="split", eta_width=24, eta_depth=2)
+    mj = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3)
+    assert ms.intensity_mode == "lse" and ms.psi is None
+    assert mj.intensity_mode == "lse" and mj.psi is None
+    # event_tables shapes hold in head mode.
+    theta = jnp.asarray([10.0, 20.0, -30.0, 0.8, 1.0, 5.0, 4.0], jnp.float32)
+    eta, nodes, t_geo, logZt = mh.event_tables(theta)
+    assert eta.shape == (241,) and nodes.shape == (241, n_nodes)
+
+
+def test_lse_roundtrip_bit_identical_with_intensity_field_present(tmp_path):
+    # The new intensity_mode/psi fields must NOT perturb lse-mode serialization: joint AND
+    # split-lse models' array leaves must round-trip bit-identically (so the real v1/v2/r22
+    # checkpoints still deserialize). psi=None contributes no leaves.
+    pmt_pos, pmt_normal = _toy_geometry()
+    for kw in ({}, {"head_mode": "split", "eta_width": 32, "eta_depth": 3}):
+        m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(3), width=64, depth=3,
+                      feature_set="v2", **kw)
+        assert m.intensity_mode == "lse" and m.psi is None
+        leaves = jax.tree_util.tree_leaves(eqx.filter(m, eqx.is_array))
+        path = str(tmp_path / "lse.eqx")
+        eqx.tree_serialise_leaves(path, m)
+        tmpl = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(999), width=64, depth=3,
+                         feature_set="v2", **kw)
+        m_back = eqx.tree_deserialise_leaves(path, tmpl)
+        leaves_back = jax.tree_util.tree_leaves(eqx.filter(m_back, eqx.is_array))
+        assert len(leaves) == len(leaves_back)
+        for a, b in zip(leaves, leaves_back):
+            assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_head_serialise_roundtrip(tmp_path):
+    # a head model round-trips through a head template (all three trunks + psi recovered).
+    pmt_pos, pmt_normal = _toy_geometry()
+    m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(5), width=48, depth=4,
+                  head_mode="split", eta_width=32, eta_depth=3, feature_set="v2",
+                  intensity_mode="head", psi_width=32, psi_depth=2)
+    path = str(tmp_path / "head.eqx")
+    eqx.tree_serialise_leaves(path, m)
+    tmpl = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(111), width=48, depth=4,
+                     head_mode="split", eta_width=32, eta_depth=3, feature_set="v2",
+                     intensity_mode="head", psi_width=32, psi_depth=2)
+    m_back = eqx.tree_deserialise_leaves(path, tmpl)
+    assert m_back.psi is not None
+    theta = jnp.asarray([10.0, 20.0, -30.0, 0.8, 1.0, 5.0, 4.0], jnp.float32)
+    lz0 = float(m.log_intensity(theta, jnp.asarray(0.0)))
+    lz1 = float(m_back.log_intensity(theta, jnp.asarray(0.0)))
+    assert abs(lz0 - lz1) < 1e-6
+
+
+def test_head_gauge_centering_and_sensor_invariance():
+    # In head mode event_tables returns eta with ~zero mean over sensors (gauge fixed), and
+    # the sensor softmax still normalizes to 1 and is INVARIANT to that centering + to psi.
+    jax.config.update("jax_enable_x64", True)
+    try:
+        pmt_pos, pmt_normal = _toy_geometry()
+        m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(1), width=32, depth=3,
+                      head_mode="split", eta_width=24, eta_depth=2, feature_set="v2",
+                      intensity_mode="head")
+        theta = jnp.asarray([50.0, -80.0, 120.0, 1.1, 2.0, 0.0, 3.0], jnp.float64)
+        eta, _, _, _ = m.event_tables(theta)
+        assert abs(float(jnp.mean(eta))) < 1e-5                    # gauge-centered
+        ls = jax.vmap(lambda s: m.log_prob_sensor(s, theta))(jnp.arange(241))
+        assert abs(float(jnp.sum(jnp.exp(ls))) - 1.0) < 1e-6       # normalizes
+        # perturbing psi must leave the sensor factor EXACTLY unchanged (Lambda-only head).
+        m2 = eqx.tree_at(lambda mm: mm.psi.layers[-1].bias, m,
+                         m.psi.layers[-1].bias + 5.0)
+        ls2 = jax.vmap(lambda s: m2.log_prob_sensor(s, theta))(jnp.arange(241))
+        assert float(jnp.max(jnp.abs(ls - ls2))) == 0.0
+    finally:
+        jax.config.update("jax_enable_x64", False)
+
+
+def test_head_logLambda_independent_of_eta():
+    # DECOUPLING: in head mode logLambda = phi(E) + psi(rho,z) does NOT read eta -- perturbing
+    # the eta trunk leaves logLambda EXACTLY constant. In lse mode the same perturbation DOES
+    # move logLambda (contrast, proving the coupling the run23 head removes).
+    pmt_pos, pmt_normal = _toy_geometry()
+    theta = jnp.asarray([50.0, -80.0, 120.0, 1.1, 2.0, 0.0, 3.0], jnp.float32)
+
+    mh = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(1), width=32, depth=3,
+                   head_mode="split", eta_width=24, eta_depth=2, feature_set="v2",
+                   intensity_mode="head")
+    eta_h, _, _, _ = mh.event_tables(theta)
+    lz_h = jnp.asarray(np.log(np.sum(np.exp(np.asarray(eta_h)))), jnp.float32)
+    lam0 = float(mh.log_intensity(theta, lz_h))
+    mh2 = eqx.tree_at(lambda mm: mm.mlp_eta.layers[-1].bias, mh,
+                      mh.mlp_eta.layers[-1].bias + 3.0)
+    eta_h2, _, _, _ = mh2.event_tables(theta)
+    lz_h2 = jnp.asarray(np.log(np.sum(np.exp(np.asarray(eta_h2)))), jnp.float32)
+    lam1 = float(mh2.log_intensity(theta, lz_h2))
+    assert abs(lam0 - lam1) < 1e-6, f"head logLambda moved with eta: {lam0} vs {lam1}"
+
+    # lse contrast: logsumexp(eta) DOES enter Lambda.
+    ml = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(1), width=32, depth=3,
+                   head_mode="split", eta_width=24, eta_depth=2, feature_set="v2")
+    from jax.scipy.special import logsumexp as _lse
+    eta_l, _, _, _ = ml.event_tables(theta)
+    lam_l0 = float(ml.log_intensity(theta, _lse(eta_l)))
+    ml2 = eqx.tree_at(lambda mm: mm.mlp_eta.layers[-1].bias, ml,
+                      ml.mlp_eta.layers[-1].bias + 3.0)
+    eta_l2, _, _, _ = ml2.event_tables(theta)
+    lam_l1 = float(ml2.log_intensity(theta, _lse(eta_l2)))
+    assert abs(lam_l0 - lam_l1) > 1e-3, "lse logLambda should move with eta (coupling)"
+
+
+def test_head_loss_runs_and_flows_to_psi():
+    # the event loss runs end-to-end in head mode and gradient reaches psi.
+    pmt_pos, pmt_normal = _toy_geometry()
+    m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(2), width=32, depth=3,
+                  head_mode="split", eta_width=24, eta_depth=2, feature_set="v2",
+                  intensity_mode="head")
+    rng = np.random.default_rng(9)
+    B, P = 6, 20
+    pmt_ids = jnp.asarray(rng.integers(0, 241, size=(B, P)), jnp.int32)
+    theta = jnp.asarray(rng.uniform(0.5, 9.5, size=(B, 7)).astype(np.float32))
+    tg = jax.vmap(lambda ss, th: jax.vmap(
+        lambda s: th[5] + m.n_eff * jnp.linalg.norm(m.pmt_pos[s] - th[:3]) / 299.792458
+    )(ss))(pmt_ids, theta)
+    t = tg + jnp.asarray(rng.uniform(0, 2, size=(B, P)), jnp.float32)
+    mask = jnp.ones((B, P), jnp.float32)
+    (loss, _), g = eqx.filter_value_and_grad(
+        lambda mm: splinemle_loss(mm, (pmt_ids, t, mask, theta)), has_aux=True)(m)
+    assert np.isfinite(float(loss))
+    g_psi = sum(float(jnp.sum(jnp.abs(l.weight))) for l in g.psi.layers)
+    assert np.isfinite(g_psi) and g_psi > 0.0
+
+
 def test_split_head_gradient_flows_to_both_trunks():
     # both trunks receive gradient under the event loss (eta head is no longer starved by the
     # time nodes -- it has its own parameters).
