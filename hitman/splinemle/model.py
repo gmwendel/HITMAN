@@ -84,7 +84,13 @@ DEFAULT_KNOTS = (
     3.5, 5.0, 7.0, 10.0, 14.0, 20.0, 28.0, 40.0, 55.0, 75.0, 110.0,
 )
 
-N_COND_FEATURES = 5
+N_COND_FEATURES = 5        # v1 conditioner: 5 O(2) invariants
+N_COND_FEATURES_V2 = 9     # v2 (run21): + distance-basis (log_d, inv_d, tanh inv_d2, tanh solid-angle)
+
+# Squash scale for the O(25)-range near-wall 1/d^2 basis features (keeps MLP inputs O(1)).
+COND_SQUASH_SCALE = 8.0
+
+_N_COND_FEATURES = {"v1": N_COND_FEATURES, "v2": N_COND_FEATURES_V2}
 
 # phi(E) yield-head knots on [0, 10] MeV (8 knots) and the dispersion linearization anchor.
 DEFAULT_PHI_KNOTS = (0.0, 0.75, 1.5, 2.5, 3.5, 5.0, 7.0, 10.0)
@@ -244,17 +250,22 @@ class SplineMLE(eqx.Module):
     knots: tuple = eqx.field(static=True)
     phi_knots: tuple = eqx.field(static=True)
     count_model: str = eqx.field(static=True)
+    feature_set: str = eqx.field(static=True)
 
     def __init__(self, pmt_pos, pmt_normal, *, key, knots=DEFAULT_KNOTS, width: int = 192,
                  depth: int = 3, n_eff_init: float = 1.40, activation: str = "mish",
                  count_model: str = "nbinom", phi_knots=DEFAULT_PHI_KNOTS,
                  phi_init_values=None, phi_offset: float = 241.0, phi_anchor=None,
-                 disp_init=(3.5, 0.15)):
+                 disp_init=(3.5, 0.15), feature_set: str = "v1"):
         self.knots = tuple(float(k) for k in knots)
         self.phi_knots = tuple(float(k) for k in phi_knots)
+        if feature_set not in _N_COND_FEATURES:
+            raise ValueError(f"unsupported feature_set {feature_set!r} "
+                             f"(expected one of {sorted(_N_COND_FEATURES)})")
+        self.feature_set = feature_set
         self.log_n_eff = jnp.log(jnp.asarray(n_eff_init, jnp.float32))
         n_nodes = len(self.knots)
-        self.mlp = _CondMLP(N_COND_FEATURES, n_nodes + 1, width, depth,
+        self.mlp = _CondMLP(_N_COND_FEATURES[feature_set], n_nodes + 1, width, depth,
                             activation=activation, key=key)
         self.pmt_pos = jnp.asarray(pmt_pos, jnp.float32)
         self.pmt_normal = jnp.asarray(pmt_normal, jnp.float32)
@@ -295,19 +306,40 @@ class SplineMLE(eqx.Module):
 
     # -- geometry / conditioner ------------------------------------------------
     def _sensor_features(self, pos, nrm, theta):
-        """(pmt pos (3,), normal (3,), theta (7,)) -> (5,) invariants, distance d."""
+        """(pmt pos (3,), normal (3,), theta (7,)) -> (F,) invariants, distance d.
+
+        F = 5 for ``feature_set='v1'`` (the original O(2) invariants) or 9 for
+        ``feature_set='v2'`` (run21), which appends a distance basis that lets the smooth
+        MLP synthesize the 1/d^2 near-wall solid-angle curvature it could not build from a
+        single linear-d input. The first five features are IDENTICAL to v1 in both cases.
+        d carries a 1e-6 epsilon floor, so log_d / inv_d stay finite even at d -> 0.
+        """
         rvec = pos - theta[:3]
         d = jnp.linalg.norm(rvec) + 1e-6
         h = rvec / d                       # unit vertex -> PMT (direct-light travel dir)
         e = ft.direction(theta)
-        feats = jnp.stack([
-            d / ft.POSITION_SCALE,
-            jnp.dot(h, nrm),               # incidence  cos(h, n)
+        d_scaled = d / ft.POSITION_SCALE
+        cos_incid = jnp.dot(h, nrm)        # incidence  cos(h, n)
+        base = [
+            d_scaled,
+            cos_incid,
             jnp.dot(e, nrm),               # direction  cos(e, n)
             jnp.dot(e, h),                 # Cherenkov  cos(e, h)
             theta[ft.ENERGY] - 1.0,
-        ])
-        return feats, d
+        ]
+        if self.feature_set == "v1":
+            return jnp.stack(base), d
+        # v2 distance basis (prep-B spec): log_d, inv_d, squashed inv_d^2 and solid-angle.
+        inv_d = ft.POSITION_SCALE / d
+        inv_d2 = inv_d * inv_d
+        solid_angle = jnp.abs(cos_incid) * inv_d2
+        base += [
+            jnp.log(d_scaled),                                   # log_d
+            inv_d,                                               # inv_d
+            jnp.tanh(inv_d2 / COND_SQUASH_SCALE),                # squashed 1/d^2
+            jnp.tanh(solid_angle / COND_SQUASH_SCALE),           # squashed solid angle
+        ]
+        return jnp.stack(base), d
 
     def event_tables(self, theta):
         """All-sensor conditioner for one theta: (eta (241,), nodes (241, J+1),

@@ -12,6 +12,7 @@ from hitman.splinemle.model import (
     DEFAULT_PHI_KNOTS,
     E_REF_DISP,
     N_COND_FEATURES,
+    N_COND_FEATURES_V2,
     SUPPORT_FLOOR,
     SplineMLE,
     density_u,
@@ -33,7 +34,7 @@ from hitman.splinemle.train import (
 
 __all__ = [
     "SplineMLE", "DEFAULT_KNOTS", "DEFAULT_PHI_KNOTS", "E_REF_DISP",
-    "N_COND_FEATURES", "SUPPORT_FLOOR", "C_MM_PER_NS",
+    "N_COND_FEATURES", "N_COND_FEATURES_V2", "SUPPORT_FLOOR", "C_MM_PER_NS",
     "log_expm1_over_x", "interval_log_integrals", "logZ_time", "ell_at", "log_prob_u",
     "density_u", "event_terms", "batch_terms", "splinemle_loss",
     "EventSpec", "FitResult", "build_event_spec", "make_event_batch", "fit_splinemle",

@@ -304,6 +304,57 @@ def test_gradient_flows_to_phi_and_disp():
     assert np.isfinite(float(jnp.sum(g.disp))) and float(jnp.sum(jnp.abs(g.disp))) > 0
 
 
+# ---------------------------------------------------------------------------
+# run21: v2 conditioner feature set (distance basis) + v1 back-compat
+# ---------------------------------------------------------------------------
+def test_v2_feature_shape_and_finiteness():
+    # v2 adds 4 distance-basis features (5 -> 9); first five must equal v1 exactly, and
+    # every feature is finite even at an extreme near-zero distance (epsilon-floored d).
+    pmt_pos, pmt_normal = _toy_geometry()
+    m1 = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, feature_set="v1")
+    m2 = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, feature_set="v2")
+    theta = jnp.asarray([50.0, -80.0, 120.0, 1.1, 2.0, 0.0, 3.0], jnp.float32)
+    for pos, nrm in ((pmt_pos[0], pmt_normal[0]),
+                     (jnp.asarray([50.0, -80.0, 120.0], jnp.float32),  # d ~ 0 (at vertex)
+                      pmt_normal[3])):
+        f1, d1 = m1._sensor_features(pos, nrm, theta)
+        f2, d2 = m2._sensor_features(pos, nrm, theta)
+        assert f1.shape == (5,) and f2.shape == (9,)
+        assert float(jnp.max(jnp.abs(f2[:5] - f1))) == 0.0     # first five identical
+        assert bool(jnp.all(jnp.isfinite(f2))), f"non-finite v2 feature at d={float(d2)}"
+    # the conditioner MLP first layer consumes the wider vector under v2.
+    assert m1.mlp.layers[0].weight.shape[1] == 5
+    assert m2.mlp.layers[0].weight.shape[1] == 9
+
+
+def test_v1_template_shapes_unchanged_and_roundtrip(tmp_path):
+    # A v1 model (default feature_set) must keep IDENTICAL leaf shapes so existing receipts'
+    # SplineMLE(width=192, depth=3, ...) template still deserializes v1 checkpoints. Verify
+    # by a serialise/deserialise round-trip through a fresh default (v1) template.
+    pmt_pos, pmt_normal = _toy_geometry()
+    m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(3), width=192, depth=3)
+    assert m.feature_set == "v1"                               # default unchanged
+    shapes = [np.asarray(l).shape for l in
+              jax.tree_util.tree_leaves(eqx.filter(m, eqx.is_array))]
+    path = str(tmp_path / "v1.eqx")
+    eqx.tree_serialise_leaves(path, m)
+    tmpl = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(999), width=192, depth=3)
+    m_back = eqx.tree_deserialise_leaves(path, tmpl)
+    shapes_back = [np.asarray(l).shape for l in
+                   jax.tree_util.tree_leaves(eqx.filter(m_back, eqx.is_array))]
+    assert shapes == shapes_back
+    assert m.mlp.layers[0].weight.shape[1] == 5                # v1 first layer takes 5 features
+
+
+def test_v2_forward_and_normalization():
+    # v2 model still normalizes exactly: softmax sensor factor sums to 1.
+    pmt_pos, pmt_normal = _toy_geometry()
+    m = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(1), width=48, feature_set="v2")
+    theta = jnp.asarray([10.0, 20.0, -30.0, 0.8, 1.0, 5.0, 4.0], jnp.float32)
+    ls = jax.vmap(lambda s: m.log_prob_sensor(s, theta))(jnp.arange(241))
+    assert abs(float(jnp.sum(jnp.exp(ls))) - 1.0) < 1e-5
+
+
 def test_batch_and_preflight():
     store = _FakeStore()
     data = _FakeData(store)
