@@ -71,11 +71,27 @@ class DimSpec(NamedTuple):
 
     @property
     def kind(self) -> str:
-        """Flow-domain kind: ``'circ'``, ``'cos'`` or ``'box'``."""
+        """Flow-domain kind: ``'circ'``, ``'cos'`` or ``'box'``.
+
+        Raises ``ValueError`` on a contradictory dim (``circular`` + ``cos``, a box on a
+        circular/cos dim, or a box dim missing either bound) — every consumer reads the
+        domain through here, so a misconfigured spec fails loudly at first use instead of
+        silently resolving by flag precedence.
+        """
+        if self.circular and self.cos:
+            raise ValueError(
+                f"dim {self.name!r}: circular and cos are mutually exclusive")
+        if (self.circular or self.cos) and not (self.lo is None and self.hi is None):
+            raise ValueError(
+                f"dim {self.name!r}: circular/cos dims must not set a (lo, hi) box")
         if self.circular:
             return "circ"
         if self.cos:
             return "cos"
+        if self.lo is None or self.hi is None:
+            raise ValueError(
+                f"dim {self.name!r}: a box dim needs both lo and hi (got "
+                f"lo={self.lo!r}, hi={self.hi!r})")
         return "box"
 
 
@@ -165,6 +181,7 @@ class ObsSpec(NamedTuple):
         alpha_r, alpha_t)``.
     count_names : tuple of str
         Column names of ``EventBatch.charge`` — the per-event count/aggregate observation.
+        Required (no default): the count layout is as detector-specific as the marks.
     has_sensor_index : bool
         Whether a discrete per-object sensor index (``EventBatch.pmt_id``) is carried. True
         for detectors with a fixed sensor grid (WC softmax mark); False for continuous-mark
@@ -175,7 +192,7 @@ class ObsSpec(NamedTuple):
     """
 
     mark_names: Tuple[str, ...]
-    count_names: Tuple[str, ...] = ("total_charge", "n_hits")
+    count_names: Tuple[str, ...]
     has_sensor_index: bool = False
     circular_marks: Tuple[int, ...] = ()
 
@@ -204,6 +221,9 @@ WC_HYP_SPEC = HypSpec(
         DimSpec("zen", cos=True, units="rad"),
         DimSpec("az", circular=True, units="rad"),
         DimSpec("t", -260.0, 260.0, units="ns"),
+        # E: ``positive`` records the physical constraint; the (lo, hi) box is the flow's
+        # padded PRIOR domain, which deliberately extends past the physical edges so the
+        # boundary bins keep support (same convention as flow.DEFAULT_BOX since 1.x).
         DimSpec("E", -0.5, 10.5, positive=True, units="MeV"),
     ),
     zenith=3,

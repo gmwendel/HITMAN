@@ -104,7 +104,19 @@ def _ray_entries(B, d, instrument: ProjectionInstrument = RAY_INSTRUMENT):
     return jnp.stack([d @ Bss @ d, B[p_hi][sp] @ d, B[p_lo][sp] @ d])
 
 
+def _check_hyp_dim(g, who):
+    # VECH_IDX/_P are frozen at import to the WC_HYP_SPEC dimension. A smaller theta would
+    # NOT error on B[VECH_IDX...] — jnp clamps out-of-bounds gathers — it would silently
+    # return wrong numbers, the exact failure mode this codebase exists to forbid.
+    if g.shape[-1] != _NDIM:
+        raise ValueError(
+            f"{who}: hypothesis dim {g.shape[-1]} != module dim {_NDIM} "
+            f"(names/VECH indices are built from WC_HYP_SPEC at import; a different "
+            f"HypSpec needs its own moment_names/vech layout)")
+
+
 def lean_vector(g, H, theta, instrument: ProjectionInstrument = RAY_INSTRUMENT):
+    _check_hyp_dim(g, "lean_vector")
     B = H + jnp.outer(g, g)
     d = instrument.project(theta)
     sp = jnp.asarray(instrument.spatial)
@@ -115,6 +127,7 @@ def lean_vector(g, H, theta, instrument: ProjectionInstrument = RAY_INSTRUMENT):
 
 
 def full_vector(g, H, theta, instrument: ProjectionInstrument = RAY_INSTRUMENT):
+    _check_hyp_dim(g, "full_vector")
     B = H + jnp.outer(g, g)
     d = instrument.project(theta)
     sp = jnp.asarray(instrument.spatial)

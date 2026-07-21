@@ -50,7 +50,10 @@ class DeepSetsEncoder(eqx.Module):
     different pair to encode a non-WC mark (e.g. continuous ``(dt, alpha_r, alpha_t)``) with
     no other change. The map is a *static* field (not a trained leaf), so a serialized
     encoder round-trips through the same template that supplies the map, exactly like the
-    MLP activation strings elsewhere in the stack.
+    MLP activation strings elsewhere in the stack. Use a MODULE-LEVEL function, not a
+    lambda/closure: static fields enter the pytree structure by object equality, so two
+    encoders built with distinct lambda objects are different jit cache keys (silent
+    recompiles) and a lambda does not survive template-based deserialization.
     """
 
     phi: eqx.nn.MLP

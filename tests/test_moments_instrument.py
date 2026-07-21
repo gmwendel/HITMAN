@@ -110,3 +110,17 @@ def test_default_instrument_is_ray():
     assert RAY_INSTRUMENT.spatial == (0, 1, 2)
     assert RAY_INSTRUMENT.partners == (5, 6)
     assert RAY_INSTRUMENT.partner_names == ("t", "E")
+
+
+def test_wrong_hyp_dim_raises_loudly():
+    # VECH_IDX is frozen to the WC dim at import; a smaller theta must FAIL, not silently
+    # clamp the out-of-bounds gather (jnp gathers clamp — wrong numbers, no error).
+    rng = np.random.default_rng(3)
+    g6 = jnp.asarray(rng.normal(size=6), jnp.float32)
+    A = rng.normal(size=(6, 6))
+    H6 = jnp.asarray(A + A.T, jnp.float32)
+    theta6 = jnp.asarray(rng.normal(size=6), jnp.float32)
+    with pytest.raises(ValueError, match="hypothesis dim 6"):
+        lean_vector(g6, H6, theta6)
+    with pytest.raises(ValueError, match="hypothesis dim 6"):
+        full_vector(g6, H6, theta6)

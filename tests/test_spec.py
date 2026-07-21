@@ -166,3 +166,14 @@ def test_hypspec_index_raises_on_unknown():
 def test_hypspec_positive_dims():
     assert ft.ENERGY in WC_HYP_SPEC.positive_dims
     assert set(MUON_HYP_SPEC.positive_dims) == {1, 2, 3, 4}
+
+
+def test_dimspec_contradictions_raise():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        DimSpec("bad", circular=True, cos=True).kind
+    with pytest.raises(ValueError, match="must not set"):
+        DimSpec("bad", 0.0, 1.0, circular=True).kind
+    with pytest.raises(ValueError, match="needs both lo and hi"):
+        DimSpec("bad").kind
+    with pytest.raises(ValueError, match="needs both lo and hi"):
+        DimSpec("bad", lo=0.0).kind
