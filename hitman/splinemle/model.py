@@ -86,6 +86,11 @@ DEFAULT_KNOTS = (
 
 N_COND_FEATURES = 5        # v1 conditioner: 5 O(2) invariants
 N_COND_FEATURES_V2 = 9     # v2 (run21): + distance-basis (log_d, inv_d, tanh inv_d2, tanh solid-angle)
+# run23 decoupled-intensity head psi: the full O(2)-invariant set of theta -- vertex (rho, z),
+# the three direction components in the cylindrical frame at the vertex (d_z, d_r = d.rho_hat,
+# |d_t| = |d.phi_hat|, the tangential magnitude taken absolute for reflection symmetry), and E.
+N_PSI_FEATURES = 6
+RHO_FLOOR = 1e-6           # safe floor so d_r/d_t stay finite at rho -> 0 (target is smooth there)
 
 # Squash scale for the O(25)-range near-wall 1/d^2 basis features (keeps MLP inputs O(1)).
 COND_SQUASH_SCALE = 8.0
@@ -264,8 +269,12 @@ class SplineMLE(eqx.Module):
     # through a default template -- verified. In "split" mode ``mlp`` emits n_nodes time
     # nodes and ``mlp_eta`` emits the single eta.
     mlp_eta: object = None
-    # DECOUPLED-INTENSITY head (run23): small MLP (rho_vtx, z_vtx) -> scalar, present ONLY in
-    # ``intensity_mode="head"`` (requires ``head_mode="split"``). None -> no array leaves.
+    # DECOUPLED-INTENSITY head (run23): MLP over the SIX O(2) invariants of theta -> scalar
+    # logLambda, present ONLY in ``intensity_mode="head"`` (requires ``head_mode="split"``).
+    # None -> no array leaves. lse(eta(theta)) is exactly a function of these six invariants
+    # (eta is built from per-sensor O(2) invariants of the same theta over a fixed array), so a
+    # 6-feature head can represent v2's count mean; a (rho,z)-only head could NOT (the intensity
+    # depends strongly on the vertex-DIRECTION components, near-wall especially -- run23-prep2).
     psi: object = None
 
     def __init__(self, pmt_pos, pmt_normal, *, key, knots=DEFAULT_KNOTS, width: int = 192,
@@ -274,7 +283,7 @@ class SplineMLE(eqx.Module):
                  phi_init_values=None, phi_offset: float = 241.0, phi_anchor=None,
                  disp_init=(3.5, 0.15), feature_set: str = "v1", head_mode: str = "joint",
                  eta_width: int = 128, eta_depth: int = 3, intensity_mode: str = "lse",
-                 psi_width: int = 32, psi_depth: int = 2):
+                 psi_width: int = 64, psi_depth: int = 3):
         self.knots = tuple(float(k) for k in knots)
         self.phi_knots = tuple(float(k) for k in phi_knots)
         if feature_set not in _N_COND_FEATURES:
@@ -311,9 +320,10 @@ class SplineMLE(eqx.Module):
                                 activation=activation, key=k_time)
             self.mlp_eta = _CondMLP(n_feat, 1, eta_width, eta_depth,
                                     activation=activation, key=k_eta)
-        # psi: the run23 decoupled-intensity head. 2 event-level features -> scalar.
+        # psi: the run23 decoupled-intensity head. 6 O(2)-invariant theta features -> scalar.
         if intensity_mode == "head":
-            self.psi = _CondMLP(2, 1, psi_width, psi_depth, activation=activation, key=k_psi)
+            self.psi = _CondMLP(N_PSI_FEATURES, 1, psi_width, psi_depth,
+                                activation=activation, key=k_psi)
         else:
             self.psi = None
         self.pmt_pos = jnp.asarray(pmt_pos, jnp.float32)
@@ -455,22 +465,46 @@ class SplineMLE(eqx.Module):
         lt = log_prob_u(t - t_geo[pmt_id], nodes[pmt_id], self.knots_arr, floor)
         return ls + lt
 
+    def _psi_features(self, theta):
+        """The 6 O(2) invariants of theta the decoupled intensity head consumes.
+
+        [rho/SCALE, z/SCALE, d_z, d_r, |d_t|, (E-5)/5] where d = unit direction, rho_hat and
+        phi_hat are the cylindrical unit vectors at the vertex, d_r = d.rho_hat (radial),
+        d_t = d.phi_hat (tangential; abs for the detector's reflection symmetry), d_z = d.z_hat.
+        At rho -> 0 the numerators vanish with rho so d_r,|d_t| -> 0 under the RHO_FLOOR guard;
+        the target logLambda is smooth there, so the convention is immaterial."""
+        x, y, z = theta[ft.X], theta[ft.Y], theta[ft.Z]
+        rho = jnp.hypot(x, y)
+        rho_safe = jnp.maximum(rho, RHO_FLOOR)
+        e = ft.direction(theta)                         # unit direction (3,)
+        d_r = (e[0] * x + e[1] * y) / rho_safe          # d . rho_hat
+        d_t = (-e[0] * y + e[1] * x) / rho_safe         # d . phi_hat
+        return jnp.stack([
+            rho / ft.POSITION_SCALE,
+            z / ft.POSITION_SCALE,
+            e[2],                                       # d_z
+            d_r,
+            jnp.abs(d_t),                               # |d_t|, reflection-symmetric
+            (theta[ft.ENERGY] - 5.0) / 5.0,
+        ])
+
     def log_intensity(self, theta, log_eta_Z):
         """log Lambda(theta), the log NB2/Poisson mean count.
 
         * ``intensity_mode="lse"`` (v1/v2/r22): Lambda = exp(phi(E) + logsumexp(eta)); the
           softmax mass carries the total yield, so this reads the caller's ``log_eta_Z``.
-        * ``intensity_mode="head"`` (run23): the count mean gets its OWN geometry head --
-          logLambda = phi(E) + psi(rho_vtx, z_vtx), rho_vtx = hypot(x, y). eta no longer feeds
-          Lambda (it is gauge-centered pure shape), so ``log_eta_Z`` is IGNORED here. This
-          decouples the sensor allocation from the count factor (run23-prep: the coupling
-          priced the sensor-optimal allocation out of the loss)."""
-        E = theta[ft.ENERGY]
+        * ``intensity_mode="head"`` (run23): a SINGLE decoupled head carries the whole log mean
+          -- logLambda = psi(6 O(2) invariants of theta), E included. phi(E) is DROPPED from the
+          count path (``log_eta_Z`` and phi are BOTH ignored): v2's count mean was never
+          E-monotone-constrained (lse(eta) was already a free function of all theta incl. E), so
+          nothing receipt-backed is lost, and the single head removes the phi/psi degeneracy.
+          eta is gauge-centered pure allocation shape and no longer feeds Lambda -- decoupling
+          the sensor factor from the count factor (run23-prep: the coupling priced the
+          sensor-optimal allocation out of the loss). phi_e0/phi_raw remain as (unused) leaves
+          for checkpoint/template compatibility."""
         if self.intensity_mode == "head":
-            rho = jnp.hypot(theta[ft.X], theta[ft.Y])
-            feats = jnp.stack([rho / ft.POSITION_SCALE, theta[ft.Z] / ft.POSITION_SCALE])
-            return self.phi(E) + self.psi(feats)[0]
-        return self.phi(E) + log_eta_Z
+            return self.psi(self._psi_features(theta))[0]
+        return self.phi(theta[ft.ENERGY]) + log_eta_Z
 
     def log_count(self, N, log_Lambda, E):
         """log p(N | theta). ``log_Lambda`` = phi(E) + logsumexp(eta) is the log mean count.

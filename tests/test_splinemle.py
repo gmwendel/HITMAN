@@ -457,20 +457,31 @@ def test_split_head_serialise_roundtrip(tmp_path):
 # run23: decoupled intensity head (intensity_mode="head")
 # ---------------------------------------------------------------------------
 def test_intensity_head_requires_split_and_shapes():
-    # head requires head_mode="split"; psi is a 2 -> 1 MLP with its own width/depth; lse split
-    # / joint models carry NO psi (None).
+    # head requires head_mode="split"; psi is a 6 -> 1 MLP (default 64x3) over the O(2)
+    # invariants of theta; lse split / joint models carry NO psi (None).
     pmt_pos, pmt_normal = _toy_geometry()
     with pytest.raises(ValueError):
         SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3,
                   intensity_mode="head")  # joint head_mode -> reject
     n_nodes = len(DEFAULT_KNOTS)
+    # default psi capacity is 64 wide x depth 3.
+    md = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3,
+                   head_mode="split", eta_width=24, eta_depth=2, feature_set="v2",
+                   intensity_mode="head")
+    assert md.psi.layers[0].weight.shape == (64, 6)      # default 64 wide, 6 psi features
+    assert len(md.psi.layers) == 3 + 1                   # default psi_depth=3 -> 4 Linear
     mh = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3,
                    head_mode="split", eta_width=24, eta_depth=2, feature_set="v2",
                    intensity_mode="head", psi_width=16, psi_depth=2)
     assert mh.intensity_mode == "head" and mh.psi is not None and mh.mlp_eta is not None
-    assert mh.psi.layers[0].weight.shape == (16, 2)      # psi_width=16, 2 event features
+    assert mh.psi.layers[0].weight.shape == (16, 6)      # psi_width=16, 6 O(2) features
     assert mh.psi.layers[-1].weight.shape[0] == 1        # scalar out
     assert len(mh.psi.layers) == 2 + 1                   # psi_depth=2 -> 3 Linear
+    # psi feature vector has the 6 invariants and is finite even at rho -> 0 (vertex on axis).
+    for theta in (jnp.asarray([10.0, 20.0, -30.0, 0.8, 1.0, 5.0, 4.0], jnp.float32),
+                  jnp.asarray([0.0, 0.0, 120.0, 1.1, 2.0, 0.0, 3.0], jnp.float32)):
+        f = mh._psi_features(theta)
+        assert f.shape == (6,) and bool(jnp.all(jnp.isfinite(f)))
     # lse (default) split + joint carry no psi.
     ms = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(0), width=32, depth=3,
                    head_mode="split", eta_width=24, eta_depth=2)
@@ -546,10 +557,10 @@ def test_head_gauge_centering_and_sensor_invariance():
         jax.config.update("jax_enable_x64", False)
 
 
-def test_head_logLambda_independent_of_eta():
-    # DECOUPLING: in head mode logLambda = phi(E) + psi(rho,z) does NOT read eta -- perturbing
-    # the eta trunk leaves logLambda EXACTLY constant. In lse mode the same perturbation DOES
-    # move logLambda (contrast, proving the coupling the run23 head removes).
+def test_head_logLambda_independent_of_eta_and_phi():
+    # DECOUPLING: in head mode logLambda = psi(6 invariants) ALONE -- it does NOT read eta
+    # (perturb the eta trunk) NOR phi (perturb phi_e0); both leave logLambda EXACTLY constant.
+    # In lse mode the same eta perturbation DOES move logLambda (the coupling run23 removes).
     pmt_pos, pmt_normal = _toy_geometry()
     theta = jnp.asarray([50.0, -80.0, 120.0, 1.1, 2.0, 0.0, 3.0], jnp.float32)
 
@@ -565,6 +576,9 @@ def test_head_logLambda_independent_of_eta():
     lz_h2 = jnp.asarray(np.log(np.sum(np.exp(np.asarray(eta_h2)))), jnp.float32)
     lam1 = float(mh2.log_intensity(theta, lz_h2))
     assert abs(lam0 - lam1) < 1e-6, f"head logLambda moved with eta: {lam0} vs {lam1}"
+    mh3 = eqx.tree_at(lambda mm: mm.phi_e0, mh, mh.phi_e0 + 3.7)
+    lam2 = float(mh3.log_intensity(theta, lz_h))
+    assert abs(lam0 - lam2) < 1e-6, f"head logLambda moved with phi (should be dropped): {lam2}"
 
     # lse contrast: logsumexp(eta) DOES enter Lambda.
     ml = SplineMLE(pmt_pos, pmt_normal, key=jax.random.PRNGKey(1), width=32, depth=3,
